@@ -991,9 +991,11 @@ InitialiseRFBConnection(rfbClient* client)
   client->major = major;
   client->minor = minor;
 
-  /* fall back to viewer supported version */
-  if ((major==rfbProtocolMajorVersion) && (minor>rfbProtocolMinorVersion))
-    client->minor = rfbProtocolMinorVersion;
+  /* Preserve Apple's 3.889 dialect instead of collapsing it to 3.8. */
+  if ((major==rfbProtocolMajorVersion) && (minor>rfbProtocolMinorVersion)) {
+    if (!(major == 3 && minor == 889))
+      client->minor = rfbProtocolMinorVersion;
+  }
 
   /* Legacy version of UltraVNC uses minor codes 4 and 6 for the server */
   /* left in for backwards compatibility */
@@ -1018,11 +1020,13 @@ InitialiseRFBConnection(rfbClient* client)
       DefaultSupportedMessagesTightVNC(client);
   }
 
-  /* we do not support > RFB3.8 */
+  /* We only know how to speak baseline 3.8 plus Apple's 3.889 dialect. */
   if ((major==3 && minor>8) || major>3)
   {
-    client->major=3;
-    client->minor=8;
+    if (!(major == 3 && minor == 889)) {
+      client->major=3;
+      client->minor=8;
+    }
   }
 
   rfbClientLog("VNC server supports protocol version %d.%d (viewer %d.%d)\n",
@@ -1199,7 +1203,9 @@ InitialiseRFBConnection(rfbClient* client)
     return FALSE;
   }
 
-  ci.shared = (client->appData.shareDesktop ? 1 : 0);
+  ci.shared = client->appData.hasClientInitFlags
+      ? client->appData.clientInitFlags
+      : (client->appData.shareDesktop ? 1 : 0);
 
   if (!WriteToRFBServer(client,  (char *)&ci, sz_rfbClientInitMsg)) return FALSE;
 
@@ -1247,7 +1253,6 @@ InitialiseRFBConnection(rfbClient* client)
 rfbBool
 SetFormatAndEncodings(rfbClient* client)
 {
-  rfbSetPixelFormatMsg spf;
   union {
     char bytes[sz_rfbSetEncodingsMsg + MAX_ENCODINGS*4];
     rfbSetEncodingsMsg msg;
@@ -1263,15 +1268,7 @@ SetFormatAndEncodings(rfbClient* client)
 
   if (!SupportsClient2Server(client, rfbSetPixelFormat)) return TRUE;
 
-  spf.type = rfbSetPixelFormat;
-  spf.pad1 = 0;
-  spf.pad2 = 0;
-  spf.format = client->format;
-  spf.format.redMax = rfbClientSwap16IfLE(spf.format.redMax);
-  spf.format.greenMax = rfbClientSwap16IfLE(spf.format.greenMax);
-  spf.format.blueMax = rfbClientSwap16IfLE(spf.format.blueMax);
-
-  if (!WriteToRFBServer(client, (char *)&spf, sz_rfbSetPixelFormatMsg))
+  if (!SendCurrentPixelFormat(client))
     return FALSE;
 
 
@@ -1467,6 +1464,61 @@ SetFormatAndEncodings(rfbClient* client)
   se->nEncodings = rfbClientSwap16IfLE(se->nEncodings);
 
   if (!WriteToRFBServer(client, buf.bytes, len)) return FALSE;
+
+  return TRUE;
+}
+
+rfbBool
+SendCurrentPixelFormat(rfbClient* client)
+{
+  rfbSetPixelFormatMsg spf;
+
+  if (!SupportsClient2Server(client, rfbSetPixelFormat)) return TRUE;
+
+  spf.type = rfbSetPixelFormat;
+  spf.pad1 = 0;
+  spf.pad2 = 0;
+  spf.format = client->format;
+  spf.format.redMax = rfbClientSwap16IfLE(spf.format.redMax);
+  spf.format.greenMax = rfbClientSwap16IfLE(spf.format.greenMax);
+  spf.format.blueMax = rfbClientSwap16IfLE(spf.format.blueMax);
+
+  if (!WriteToRFBServer(client, (char *)&spf, sz_rfbSetPixelFormatMsg))
+    return FALSE;
+
+  return TRUE;
+}
+
+rfbBool
+SendEncodingsOrdered(rfbClient* client, const int32_t* encodings, size_t count)
+{
+  union {
+    char bytes[sz_rfbSetEncodingsMsg + MAX_ENCODINGS*4];
+    rfbSetEncodingsMsg msg;
+  } buf;
+  rfbSetEncodingsMsg *se = &buf.msg;
+  uint32_t *encs = (uint32_t *)(&buf.bytes[sz_rfbSetEncodingsMsg]);
+  size_t i;
+  size_t len;
+
+  if (!SupportsClient2Server(client, rfbSetEncodings)) return TRUE;
+  if (!encodings && count != 0) return FALSE;
+  if (count > MAX_ENCODINGS) {
+    rfbClientErr("Too many explicit encodings requested: %lu > %d\n",
+                 (unsigned long)count, MAX_ENCODINGS);
+    return FALSE;
+  }
+
+  memset(&buf, 0, sizeof(buf));
+  se->type = rfbSetEncodings;
+  se->pad = 0;
+  se->nEncodings = rfbClientSwap16IfLE((uint16_t)count);
+  for (i = 0; i < count; ++i)
+    encs[i] = rfbClientSwap32IfLE((uint32_t)encodings[i]);
+
+  len = sz_rfbSetEncodingsMsg + count * 4;
+  if (!WriteToRFBServer(client, buf.bytes, (unsigned int)len))
+    return FALSE;
 
   return TRUE;
 }
@@ -2569,8 +2621,11 @@ HandleRFBServerMessage(rfbClient* client)
       client->GotFrameBufferUpdate(client, rect.r.x, rect.r.y, rect.r.w, rect.r.h);
     }
 
-    if (!SendIncrementalFramebufferUpdateRequest(client))
+    if (client->suppressNextIncrementalRequest) {
+      client->suppressNextIncrementalRequest = FALSE;
+    } else if (!SendIncrementalFramebufferUpdateRequest(client)) {
       return FALSE;
+    }
 
     if (client->FinishedFrameBufferUpdate)
       client->FinishedFrameBufferUpdate(client);

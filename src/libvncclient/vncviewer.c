@@ -43,6 +43,8 @@
 #include "turbojpeg.h"
 #endif
 
+static rfbBool SendDefaultInitialSetup(rfbClient* client);
+
 static void Dummy(rfbClient* client) {
 }
 static rfbBool DummyPoint(rfbClient* client, int x, int y) {
@@ -440,15 +442,25 @@ rfbBool rfbClientInitialise(rfbClient* client) {
   if (!client->MallocFrameBuffer(client))
     return FALSE;
 
-  if (!SetFormatAndEncodings(client))
-    return FALSE;
-
   if (client->updateRect.x < 0) {
     client->updateRect.x = client->updateRect.y = 0;
     client->updateRect.w = client->width;
     client->updateRect.h = client->height;
     client->isUpdateRectManagedByLib = TRUE;
   }
+
+  if (client->appData.deferInitialSetup)
+    return TRUE;
+
+  if (!SendDefaultInitialSetup(client))
+    return FALSE;
+
+  return TRUE;
+}
+
+static rfbBool SendDefaultInitialSetup(rfbClient* client) {
+  if (!SetFormatAndEncodings(client))
+    return FALSE;
 
   if (client->appData.scaleSetting>1)
   {

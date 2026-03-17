@@ -611,6 +611,7 @@ endif(X11_xcb_FOUND AND X11_xcb_xtest_FOUND AND X11_xcb_keysyms_FOUND)
 
 set(LIBVNCCLIENT_EXAMPLES
     backchannel
+    applehpdebug
     ppmtest
 )
 
@@ -663,6 +664,9 @@ if(WITH_EXAMPLES)
       set_target_properties(client_examples_${e} PROPERTIES OUTPUT_NAME ${e})
       set_target_properties(client_examples_${e} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/examples/client)
       target_link_libraries(client_examples_${e} vncclient ${CMAKE_THREAD_LIBS_INIT} ${SDL2_LIBRARY} ${GTK2_LIBRARIES} ${FFMPEG_LIBRARIES} ${LIBSSHTUNNEL_LIBRARY})
+      if(APPLE AND e STREQUAL "applehpdebug")
+        target_link_libraries(client_examples_${e} "-framework Security" "-framework CoreFoundation")
+      endif()
     endforeach(e ${LIBVNCCLIENT_EXAMPLES})
   endif(WITH_LIBVNCCLIENT)
 
