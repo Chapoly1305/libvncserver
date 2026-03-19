@@ -382,7 +382,7 @@ set(LIBVNCSERVER_SOURCES
 set(LIBVNCCLIENT_SOURCES
     ${LIBVNCCLIENT_DIR}/cursor.c
     ${LIBVNCCLIENT_DIR}/listen.c
-    ${LIBVNCCLIENT_DIR}/apple.c
+    ${LIBVNCCLIENT_DIR}/ard.c
     ${LIBVNCCLIENT_DIR}/rfbclient.c
     ${LIBVNCCLIENT_DIR}/sockets.c
     ${LIBVNCCLIENT_DIR}/vncviewer.c

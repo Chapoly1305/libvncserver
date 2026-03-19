@@ -1193,7 +1193,7 @@ static int apple_hp_enable_transport(rfbClient *client, const uint8_t *next_key,
 static int configure_apple_hp_mode(rfbClient *client) {
   if (!g_runtime.apple_hp_mode || !client) return 1;
 
-  rfbClientEnableAppleHighPerf(client, TRUE);
+  rfbClientEnableARDHighPerf(client, TRUE);
   client->appData.deferInitialSetup = TRUE;
   client->appData.hasClientInitFlags = TRUE;
   client->appData.clientInitFlags = 0xC1;
@@ -2621,8 +2621,8 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     if (!ReadFromRFBServer(client, (char *)buf, sizeof(buf))) return FALSE;
 
     g_hp.rekey_seen = 1;
-    if (!rfbClientGetAppleSessionKey(client, &session_key, &session_key_len) || session_key_len < 16) {
-      rfbClientErr("apple-hp: no Apple session key available; cannot decrypt 0x44f\n");
+    if (!rfbClientGetARDSessionKey(client, &session_key, &session_key_len) || session_key_len < 16) {
+      rfbClientErr("apple-hp: no ARD session key available; cannot decrypt 0x44f\n");
       return FALSE;
     }
 
@@ -2630,10 +2630,10 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     if (!aes_ecb_decrypt_block(session_key, buf + 4, next_key)) return FALSE;
     if (!aes_ecb_decrypt_block(session_key, buf + 20, next_iv)) return FALSE;
     if (!send_post_rekey_set_encryption_stage2(client)) return FALSE;
-    memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
-    memcpy(client->appleSessionKey, next_key, 16);
-    client->appleSessionKeyLen = 16;
-    client->appleSessionKeyReady = TRUE;
+    memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
+    memcpy(client->ardSessionKey, next_key, 16);
+    client->ardSessionKeyLen = 16;
+    client->ardSessionKeyReady = TRUE;
     client->suppressNextIncrementalRequest = TRUE;
     if (!apple_hp_enable_transport(client, next_key, next_iv, counter)) return FALSE;
     if (!send_display_configuration_blob(client)) return FALSE;

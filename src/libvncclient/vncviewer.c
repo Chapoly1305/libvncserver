@@ -388,11 +388,11 @@ rfbClient* rfbGetClient(int bitsPerSample,int samplesPerPixel,
 
   client->authScheme = 0;
   client->subAuthScheme = 0;
-  client->appleAuthType = 0;
-  client->enableAppleHighPerf = FALSE;
-  client->appleSessionKeyReady = FALSE;
-  client->appleSessionKeyLen = 0;
-  memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
+  client->ardAuthType = 0;
+  client->enableARDHighPerf = FALSE;
+  client->ardSessionKeyReady = FALSE;
+  client->ardSessionKeyLen = 0;
+  memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
   client->GetCredential = NULL;
   client->tlsSession = NULL;
   client->LockWriteToTLS = NULL;

@@ -398,11 +398,11 @@ typedef struct _rfbClient {
 
 		/** The selected security types */
 		uint32_t authScheme, subAuthScheme;
-		uint32_t appleAuthType;
-		rfbBool enableAppleHighPerf;
-		rfbBool appleSessionKeyReady;
-		size_t appleSessionKeyLen;
-		uint8_t appleSessionKey[32];
+		uint32_t ardAuthType;
+		rfbBool enableARDHighPerf;
+		rfbBool ardSessionKeyReady;
+		size_t ardSessionKeyLen;
+		uint8_t ardSessionKey[32];
 
 		/** The TLS session for Anonymous TLS and VeNCrypt */
 		void* tlsSession;
@@ -542,8 +542,8 @@ extern rfbClientLogProc rfbClientLog,rfbClientErr;
 extern rfbBool ConnectToRFBServer(rfbClient* client,const char *hostname, int port);
 extern rfbBool ConnectToRFBRepeater(rfbClient* client,const char *repeaterHost, int repeaterPort, const char *destHost, int destPort);
 extern void SetClientAuthSchemes(rfbClient* client,const uint32_t *authSchemes, int size);
-extern void rfbClientEnableAppleHighPerf(rfbClient* client, rfbBool enable);
-extern rfbBool rfbClientGetAppleSessionKey(const rfbClient* client, const uint8_t **key, size_t *len);
+extern void rfbClientEnableARDHighPerf(rfbClient* client, rfbBool enable);
+extern rfbBool rfbClientGetARDSessionKey(const rfbClient* client, const uint8_t **key, size_t *len);
 extern rfbBool InitialiseRFBConnection(rfbClient* client);
 /**
  * Sends format and encoding parameters to the server. Your application can

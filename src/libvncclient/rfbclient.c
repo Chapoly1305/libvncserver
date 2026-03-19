@@ -63,7 +63,7 @@
 #else
 #include "minilzo.h"
 #endif
-#include "apple.h"
+#include "ard.h"
 #include "tls.h"
 
 #define MAX_TEXTCHAT_SIZE 10485760 /* 10MB */
@@ -821,7 +821,7 @@ HandleARDAuth(rfbClient *client)
   rfbCredential *cred = NULL;
   rfbBool result = FALSE;
 
-  rfbClientResetAppleAuth(client);
+  rfbClientResetARDAuth(client);
 
   /* Step 1: Read the authentication material from the socket.
      A two-byte generator value, a two-byte key length value. */
@@ -876,11 +876,11 @@ HandleARDAuth(rfbClient *client)
       rfbClientErr("HandleARDAuth: hashing shared key failed\n");
       goto out;
   }
-  memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
-  memcpy(client->appleSessionKey, shared, MD5_HASH_SIZE);
-  client->appleSessionKeyLen = MD5_HASH_SIZE;
-  client->appleSessionKeyReady = TRUE;
-  client->appleAuthType = rfbARD;
+  memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
+  memcpy(client->ardSessionKey, shared, MD5_HASH_SIZE);
+  client->ardSessionKeyLen = MD5_HASH_SIZE;
+  client->ardSessionKeyReady = TRUE;
+  client->ardAuthType = rfbARD;
 
   /* Step 5: Pack the username and password into a 128-byte
      plaintext "userpass" structure: { username[64], password[64] }.
@@ -931,7 +931,7 @@ HandleARDAuth(rfbClient *client)
     FreeUserCredential(cred);
 
   if (!result)
-    rfbClientResetAppleAuth(client);
+    rfbClientResetARDAuth(client);
 
   free(mod);
   free(shared);
@@ -1007,7 +1007,7 @@ InitialiseRFBConnection(rfbClient* client)
   client->major = major;
   client->minor = minor;
 
-  /* Preserve Apple's 3.889 dialect instead of collapsing it to 3.8. */
+  /* Preserve the ARD 3.889 dialect instead of collapsing it to 3.8. */
   if ((major==rfbProtocolMajorVersion) && (minor>rfbProtocolMinorVersion)) {
     if (!(major == 3 && minor == 889))
       client->minor = rfbProtocolMinorVersion;
@@ -1036,7 +1036,7 @@ InitialiseRFBConnection(rfbClient* client)
       DefaultSupportedMessagesTightVNC(client);
   }
 
-  /* We only know how to speak baseline 3.8 plus Apple's 3.889 dialect. */
+  /* We only know how to speak baseline 3.8 plus the ARD 3.889 dialect. */
   if ((major==3 && minor>8) || major>3)
   {
     if (!(major == 3 && minor == 889)) {
@@ -1107,7 +1107,7 @@ InitialiseRFBConnection(rfbClient* client)
 	  case rfbAppleAuthRSA_SRP:
 	  case rfbAppleAuthKerberos:
 	  case rfbAppleAuthDirectSrp:
-	    if (!rfbClientHandleAppleAuth(client, authScheme)) return FALSE;
+	    if (!rfbClientHandleARDAuth(client, authScheme)) return FALSE;
 	    if (!rfbHandleAuthResult(client)) return FALSE;
 	    break;
 
