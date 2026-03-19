@@ -382,6 +382,7 @@ set(LIBVNCSERVER_SOURCES
 set(LIBVNCCLIENT_SOURCES
     ${LIBVNCCLIENT_DIR}/cursor.c
     ${LIBVNCCLIENT_DIR}/listen.c
+    ${LIBVNCCLIENT_DIR}/apple.c
     ${LIBVNCCLIENT_DIR}/rfbclient.c
     ${LIBVNCCLIENT_DIR}/sockets.c
     ${LIBVNCCLIENT_DIR}/vncviewer.c
@@ -531,6 +532,9 @@ if(WITH_LIBVNCCLIENT)
                         ${GNUTLS_LIBRARIES}
                         ${OPENSSL_LIBRARIES}
   )
+  if(APPLE)
+    target_link_libraries(vncclient "-framework Security" "-framework CoreFoundation")
+  endif()
   set(LIBVNCSERVER_LIBRARIES vncclient)
 endif(WITH_LIBVNCCLIENT)
 if(WITH_LIBVNCSERVER)

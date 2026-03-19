@@ -14,19 +14,7 @@
 #include <rfb/rfbclient.h>
 
 #include <CommonCrypto/CommonCryptor.h>
-#include <CommonCrypto/CommonKeyDerivation.h>
 #include <CommonCrypto/CommonDigest.h>
-#include <CommonCrypto/CommonRandom.h>
-#if defined(__APPLE__)
-#include <CoreFoundation/CoreFoundation.h>
-#include <Security/Security.h>
-#endif
-#if defined(__has_include)
-#if __has_include(<openssl/bn.h>)
-#include <openssl/bn.h>
-#define APPLEHPDEBUG_HAS_OPENSSL_BN 1
-#endif
-#endif
 
 #include <errno.h>
 #include <signal.h>
@@ -65,8 +53,6 @@
 #endif
 
 static volatile sig_atomic_t g_stop = 0;
-static const uint32_t kAuthTypeAppleRSA_SRP = 33;
-
 struct apple_hp_frame_stats {
   unsigned long long rects;
   unsigned long long frames;
@@ -126,8 +112,6 @@ struct apple_hp_session_state {
   uint16_t last_dynamic_request_h;
   int dynamic_request_in_flight;
   int dynamic_refresh_queued_for_request;
-  uint8_t auth33_wrap_key[16];
-  int auth33_wrap_key_ready;
   struct apple_hp_transport_state transport;
 };
 
@@ -598,531 +582,6 @@ static uint64_t read_be_u64(const uint8_t *p) {
          ((uint64_t)p[3] << 32) | ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
          ((uint64_t)p[6] << 8) | (uint64_t)p[7];
 }
-
-struct auth33_challenge_fields {
-  uint8_t cflag;
-  const uint8_t *N;
-  size_t N_len;
-  const uint8_t *g;
-  size_t g_len;
-  const uint8_t *salt;
-  size_t salt_len;
-  const uint8_t *B;
-  size_t B_len;
-  uint64_t iterations;
-  const uint8_t *options;
-  size_t options_len;
-};
-
-static int auth33_parse_challenge_fields(const uint8_t *buf, size_t n, struct auth33_challenge_fields *out) {
-  size_t off = 10;
-  uint16_t field_len;
-  if (!buf || !out || n < 11) return 0;
-  memset(out, 0, sizeof(*out));
-  if (off + 1 > n) return 0;
-  out->cflag = buf[off++];
-  if (off + 2 > n) return 0;
-  field_len = read_be_u16(buf + off);
-  off += 2;
-  if (off + field_len > n) return 0;
-  out->N = buf + off;
-  out->N_len = field_len;
-  off += field_len;
-  if (off + 2 > n) return 0;
-  field_len = read_be_u16(buf + off);
-  off += 2;
-  if (off + field_len > n) return 0;
-  out->g = buf + off;
-  out->g_len = field_len;
-  off += field_len;
-  if (off + 1 > n) return 0;
-  field_len = buf[off++];
-  if (off + field_len > n) return 0;
-  out->salt = buf + off;
-  out->salt_len = field_len;
-  off += field_len;
-  if (off + 2 > n) return 0;
-  field_len = read_be_u16(buf + off);
-  off += 2;
-  if (off + field_len > n) return 0;
-  out->B = buf + off;
-  out->B_len = field_len;
-  off += field_len;
-  if (off + 8 > n) return 0;
-  out->iterations = read_be_u64(buf + off);
-  off += 8;
-  if (off + 2 > n) return 0;
-  field_len = read_be_u16(buf + off);
-  off += 2;
-  if (off + field_len > n) return 0;
-  out->options = buf + off;
-  out->options_len = field_len;
-  return 1;
-}
-
-static int auth33_sha512_parts(uint8_t out[CC_SHA512_DIGEST_LENGTH], const void **parts,
-                               const size_t *part_lens, size_t part_count) {
-  CC_SHA512_CTX ctx;
-  size_t i;
-  if (!out) return 0;
-  CC_SHA512_Init(&ctx);
-  for (i = 0; i < part_count; ++i) {
-    if (parts[i] && part_lens[i] != 0) CC_SHA512_Update(&ctx, parts[i], (CC_LONG)part_lens[i]);
-  }
-  CC_SHA512_Final(out, &ctx);
-  return 1;
-}
-
-static int auth33_sha512_2(uint8_t out[CC_SHA512_DIGEST_LENGTH], const void *a, size_t a_len,
-                           const void *b, size_t b_len) {
-  const void *parts[2] = {a, b};
-  const size_t lens[2] = {a_len, b_len};
-  return auth33_sha512_parts(out, parts, lens, 2);
-}
-
-static int auth33_pbkdf2_sha512(const uint8_t *password, size_t password_len, const uint8_t *salt,
-                                size_t salt_len, uint32_t rounds, uint8_t *out, size_t out_len) {
-  if (!password || !salt || !out || out_len == 0) return 0;
-  return CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)password, password_len, salt, salt_len,
-                              kCCPRFHmacAlgSHA512, rounds ? rounds : 1, out, out_len) == kCCSuccess;
-}
-
-static uint8_t *auth33_utf16_bytes(const char *s, int big_endian, size_t *out_len) {
-  size_t i;
-  size_t in_len;
-  uint8_t *out;
-  if (!s || !out_len) return NULL;
-  in_len = strlen(s);
-  out = (uint8_t *)malloc(in_len * 2);
-  if (!out) return NULL;
-  for (i = 0; i < in_len; ++i) {
-    if (big_endian) {
-      out[i * 2] = 0;
-      out[i * 2 + 1] = (uint8_t)s[i];
-    } else {
-      out[i * 2] = (uint8_t)s[i];
-      out[i * 2 + 1] = 0;
-    }
-  }
-  *out_len = in_len * 2;
-  return out;
-}
-
-static int auth33_bn_to_pad(const BIGNUM *bn, uint8_t *out, size_t out_len) {
-#if APPLEHPDEBUG_HAS_OPENSSL_BN
-  if (!bn || !out || out_len == 0) return 0;
-  return BN_bn2binpad(bn, out, (int)out_len) == (int)out_len;
-#else
-  (void)bn;
-  (void)out;
-  (void)out_len;
-  return 0;
-#endif
-}
-
-static int auth33_random_bigint(BIGNUM *out, int bits) {
-#if APPLEHPDEBUG_HAS_OPENSSL_BN
-  int byte_len;
-  uint8_t *buf;
-  if (!out) return 0;
-  if (bits < 64) bits = 64;
-  byte_len = (bits + 7) / 8;
-  buf = (uint8_t *)malloc((size_t)byte_len);
-  if (!buf) return 0;
-  CCRandomGenerateBytes(buf, (size_t)byte_len);
-  if (bits % 8) buf[0] &= (uint8_t)((1u << (bits % 8)) - 1u);
-  if (BN_bin2bn(buf, byte_len, out) == NULL) {
-    free(buf);
-    return 0;
-  }
-  free(buf);
-  return 1;
-#else
-  (void)out;
-  (void)bits;
-  return 0;
-#endif
-}
-
-static int auth33_build_packet2_candidate(rfbClient *client, const uint8_t *challenge, uint32_t challenge_len,
-                                          uint8_t *outbuf, size_t outcap, size_t *outlen) {
-#if !APPLEHPDEBUG_HAS_OPENSSL_BN
-  (void)client;
-  (void)challenge;
-  (void)challenge_len;
-  (void)outbuf;
-  (void)outcap;
-  (void)outlen;
-  APPLEHP_ERROR_LOG("auth33: OpenSSL BIGNUM headers unavailable for in-process step-2 generation\n");
-  return FALSE;
-#else
-  static const uint8_t empty_user_hash[CC_SHA512_DIGEST_LENGTH] = {
-      0xcf, 0x83, 0xe1, 0x35, 0x7e, 0xef, 0xb8, 0xbd, 0xf1, 0x54, 0x28,
-      0x50, 0xd6, 0x6d, 0x80, 0x07, 0xd6, 0x20, 0xe4, 0x05, 0x0b, 0x57,
-      0x15, 0xdc, 0x83, 0xf4, 0xa9, 0x21, 0xd3, 0x6c, 0xe9, 0xce, 0x47,
-      0xd0, 0xd1, 0x3c, 0x5d, 0x85, 0xf2, 0xb0, 0xff, 0x83, 0x18, 0xd2,
-      0x87, 0x7e, 0xec, 0x2f, 0x63, 0xb9, 0x31, 0xbd, 0x47, 0x41, 0x7a,
-      0x81, 0xa5, 0x38, 0x32, 0x7a, 0xf9, 0x27, 0xda, 0x3e};
-  struct auth33_challenge_fields parsed;
-  const char *user = getenv("VNC_USER");
-  const char *password = getenv("VNC_PASS");
-  BIGNUM *N = NULL;
-  BIGNUM *g = NULL;
-  BIGNUM *B = NULL;
-  BIGNUM *a = NULL;
-  BIGNUM *A = NULL;
-  BIGNUM *x = NULL;
-  BIGNUM *v = NULL;
-  BIGNUM *k = NULL;
-  BIGNUM *u = NULL;
-  BIGNUM *ux = NULL;
-  BIGNUM *exp = NULL;
-  BIGNUM *tmp = NULL;
-  BIGNUM *base = NULL;
-  BIGNUM *S = NULL;
-  BN_CTX *bn_ctx = NULL;
-  uint8_t *Np = NULL;
-  uint8_t *gp = NULL;
-  uint8_t *Ap = NULL;
-  uint8_t *Bp = NULL;
-  uint8_t *K = NULL;
-  uint8_t *nonce16 = NULL;
-  uint8_t *inner = NULL;
-  uint8_t *wrapped = NULL;
-  uint8_t *pbkdf2_pass = NULL;
-  uint8_t *pw_utf16le = NULL;
-  uint8_t *pw_utf16be = NULL;
-  uint8_t *x_bytes = NULL;
-  uint8_t *Sp = NULL;
-  uint8_t hN[CC_SHA512_DIGEST_LENGTH];
-  uint8_t hg[CC_SHA512_DIGEST_LENGTH];
-  uint8_t hu[CC_SHA512_DIGEST_LENGTH];
-  uint8_t xor_ng[CC_SHA512_DIGEST_LENGTH];
-  uint8_t m1[CC_SHA512_DIGEST_LENGTH];
-  uint8_t digest[CC_SHA512_DIGEST_LENGTH];
-  uint8_t digest2[CC_SHA512_DIGEST_LENGTH];
-  size_t pad_len;
-  size_t user_len;
-  size_t password_len;
-  size_t x_len;
-  size_t opt_len;
-  size_t inner_len;
-  size_t wrapped_len;
-  size_t wrapped_body_len;
-  size_t pw_utf16le_len = 0;
-  size_t pw_utf16be_len = 0;
-  size_t k_len;
-  int ok = FALSE;
-  if (!client || !challenge || !challenge_len || !outbuf || !outlen) return FALSE;
-  if (!user || !*user || !password || !*password) {
-    APPLEHP_ERROR_LOG("auth33: missing VNC user/pass for in-process step-2 generation\n");
-    return FALSE;
-  }
-  if (!auth33_parse_challenge_fields(challenge, challenge_len, &parsed)) {
-    APPLEHP_ERROR_LOG("auth33: failed parsing server challenge\n");
-    return FALSE;
-  }
-  user_len = strlen(user);
-  password_len = strlen(password);
-  pad_len = parsed.N_len;
-  N = BN_bin2bn(parsed.N, (int)parsed.N_len, NULL);
-  g = BN_bin2bn(parsed.g, (int)parsed.g_len, NULL);
-  B = BN_bin2bn(parsed.B, (int)parsed.B_len, NULL);
-  a = BN_new();
-  A = BN_new();
-  x = BN_new();
-  v = BN_new();
-  k = BN_new();
-  u = BN_new();
-  ux = BN_new();
-  exp = BN_new();
-  tmp = BN_new();
-  base = BN_new();
-  S = BN_new();
-  bn_ctx = BN_CTX_new();
-  Np = (uint8_t *)malloc(pad_len);
-  gp = (uint8_t *)malloc(pad_len);
-  Ap = (uint8_t *)malloc(pad_len);
-  Bp = (uint8_t *)malloc(pad_len);
-  if (!N || !g || !B || !a || !A || !x || !v || !k || !u || !ux || !exp || !tmp || !base || !S ||
-      !bn_ctx || !Np || !gp || !Ap || !Bp) {
-    APPLEHP_ERROR_LOG("auth33: allocation failure building step-2 response\n");
-    goto done;
-  }
-  if (!auth33_random_bigint(a, 512) || !BN_mod_exp(A, g, a, N, bn_ctx) ||
-      !auth33_bn_to_pad(N, Np, pad_len) || !auth33_bn_to_pad(g, gp, pad_len) ||
-      !auth33_bn_to_pad(B, Bp, pad_len) || !auth33_bn_to_pad(A, Ap, pad_len)) {
-    APPLEHP_ERROR_LOG("auth33: failed preparing SRP inputs\n");
-    goto done;
-  }
-
-  pbkdf2_pass = (uint8_t *)malloc(128);
-  if (!pbkdf2_pass) goto done;
-  if (!auth33_pbkdf2_sha512((const uint8_t *)password, password_len, parsed.salt, parsed.salt_len,
-                            (uint32_t)parsed.iterations, pbkdf2_pass, 128)) {
-    APPLEHP_ERROR_LOG("auth33: PBKDF2 failed\n");
-    goto done;
-  }
-  pw_utf16le = auth33_utf16_bytes(password, 0, &pw_utf16le_len);
-  pw_utf16be = auth33_utf16_bytes(password, 1, &pw_utf16be_len);
-  {
-    const void *parts[2] = {":", pbkdf2_pass};
-    const size_t lens[2] = {1, 128};
-    auth33_sha512_parts(digest, parts, lens, 2);
-  }
-  {
-    const void *parts[2] = {parsed.salt, digest};
-    const size_t lens[2] = {parsed.salt_len, sizeof(digest)};
-    auth33_sha512_parts(digest2, parts, lens, 2);
-  }
-  x_len = sizeof(digest2);
-  x_bytes = (uint8_t *)malloc(x_len);
-  if (!x_bytes) goto done;
-  memcpy(x_bytes, digest2, x_len);
-  if (!BN_bin2bn(x_bytes, (int)x_len, x)) goto done;
-
-  auth33_sha512_2(digest, Np, pad_len, gp, pad_len);
-  if (!BN_bin2bn(digest, sizeof(digest), k)) goto done;
-
-  auth33_sha512_2(digest, Ap, pad_len, Bp, pad_len);
-  if (!BN_bin2bn(digest, sizeof(digest), u)) goto done;
-  if (!BN_mod_exp(v, g, x, N, bn_ctx) || !BN_mod_mul(tmp, k, v, N, bn_ctx) ||
-      !BN_mod_sub(base, B, tmp, N, bn_ctx) || !BN_mul(ux, u, x, bn_ctx) ||
-      !BN_add(exp, a, ux) || !BN_mod_exp(S, base, exp, N, bn_ctx)) goto done;
-
-  Sp = (uint8_t *)malloc(pad_len);
-  if (!Sp || !auth33_bn_to_pad(S, Sp, pad_len)) goto done;
-  auth33_sha512_2(digest, Sp, pad_len, NULL, 0);
-  K = (uint8_t *)malloc(sizeof(digest));
-  if (!K) goto done;
-  memcpy(K, digest, sizeof(digest));
-  k_len = sizeof(digest);
-  auth33_sha512_2(hN, Np, pad_len, NULL, 0);
-  auth33_sha512_2(hg, gp, pad_len, NULL, 0);
-  memcpy(hu, empty_user_hash, sizeof(hu));
-  {
-    size_t i;
-    for (i = 0; i < sizeof(xor_ng); ++i) xor_ng[i] = hN[i] ^ hg[i];
-  }
-  {
-    const void *parts[6] = {xor_ng, hu, parsed.salt, Ap, Bp, K};
-    const size_t lens[6] = {sizeof(xor_ng), sizeof(hu), parsed.salt_len, pad_len, pad_len, k_len};
-    auth33_sha512_parts(m1, parts, lens, 6);
-  }
-
-  opt_len = parsed.options_len;
-  nonce16 = (uint8_t *)malloc(16);
-  inner_len = 2 + pad_len + 1 + sizeof(m1) + 2 + opt_len + 1 + 16;
-  wrapped_body_len = 4 + inner_len;
-  wrapped_len = wrapped_body_len + 384;
-  inner = (uint8_t *)malloc(inner_len);
-  wrapped = (uint8_t *)calloc(1, wrapped_len);
-  if (!nonce16 || !inner || !wrapped) goto done;
-  CCRandomGenerateBytes(nonce16, 16);
-  {
-    size_t off = 0;
-    write_be_u16(inner + off, (uint16_t)pad_len);
-    off += 2;
-    memcpy(inner + off, Ap, pad_len);
-    off += pad_len;
-    inner[off++] = (uint8_t)sizeof(m1);
-    memcpy(inner + off, m1, sizeof(m1));
-    off += sizeof(m1);
-    write_be_u16(inner + off, (uint16_t)opt_len);
-    off += 2;
-    memcpy(inner + off, parsed.options, opt_len);
-    off += opt_len;
-    inner[off++] = 16;
-    memcpy(inner + off, nonce16, 16);
-  }
-  write_be_u16(wrapped + 0, 0);
-  write_be_u16(wrapped + 2, (uint16_t)inner_len);
-  memcpy(wrapped + 4, inner, inner_len);
-  if (outcap < 14 + wrapped_len + 4) goto done;
-  write_be_u32(outbuf, (uint32_t)(10 + wrapped_len));
-  write_be_u16(outbuf + 4, 0x0100);
-  memcpy(outbuf + 6, "RSA1", 4);
-  write_be_u16(outbuf + 10, 0x0002);
-  write_be_u16(outbuf + 12, (uint16_t)wrapped_body_len);
-  memcpy(outbuf + 14, wrapped, wrapped_len);
-  *outlen = 14 + wrapped_len;
-  CC_SHA256(K, (CC_LONG)k_len, digest);
-  memcpy(g_hp.auth33_wrap_key, digest, sizeof(g_hp.auth33_wrap_key));
-  g_hp.auth33_wrap_key_ready = 1;
-  APPLEHP_INFO_LOG("auth33: using in-process step-2 response generation\n");
-  ok = TRUE;
-done:
-  BN_free(N);
-  BN_free(g);
-  BN_free(B);
-  BN_free(a);
-  BN_free(A);
-  BN_free(x);
-  BN_free(v);
-  BN_free(k);
-  BN_free(u);
-  BN_free(ux);
-  BN_free(exp);
-  BN_free(tmp);
-  BN_free(base);
-  BN_free(S);
-  BN_CTX_free(bn_ctx);
-  free(Np);
-  free(gp);
-  free(Ap);
-  free(Bp);
-  free(K);
-  free(nonce16);
-  free(inner);
-  free(wrapped);
-  free(pbkdf2_pass);
-  free(pw_utf16le);
-  free(pw_utf16be);
-  free(x_bytes);
-  free(Sp);
-  return ok;
-#endif
-}
-
-static rfbBool read_auth33_length_prefixed_blob(rfbClient *client, uint8_t **outbuf,
-                                                uint32_t *outlen, const char *what) {
-  uint8_t inhdr[4];
-  uint8_t *buf = NULL;
-  uint32_t n = 0;
-
-  if (!outbuf || !outlen) return FALSE;
-  *outbuf = NULL;
-  *outlen = 0;
-  if (!ReadFromRFBServer(client, (char *)inhdr, 4)) {
-    rfbClientErr("auth33: failed reading %s length\n", what);
-    return FALSE;
-  }
-  n = read_be_u32(inhdr);
-  rfbClientLog("auth33: %s length=%u\n", what, (unsigned)n);
-  if (n == 0 || n > (1u << 20)) {
-    rfbClientErr("auth33: suspicious %s length=%u\n", what, (unsigned)n);
-    return FALSE;
-  }
-  buf = (uint8_t *)malloc(n);
-  if (!buf) return FALSE;
-  if (!ReadFromRFBServer(client, (char *)buf, n)) {
-    free(buf);
-    return FALSE;
-  }
-  *outbuf = buf;
-  *outlen = n;
-  return TRUE;
-}
-
-#if defined(__APPLE__)
-static void release_cfref(CFTypeRef ref) {
-  if (ref) CFRelease(ref);
-}
-
-static rfbBool build_auth33_init_key_material(const uint8_t *type0_reply, uint32_t type0_reply_len,
-                                              uint8_t *outbuf, size_t outcap, size_t *outlen) {
-  const char *username = getenv("VNC_USER");
-  uint32_t der_len;
-  uint8_t plaintext[512];
-  size_t plaintext_len = 0;
-  const uint8_t *der;
-  CFDataRef der_data = NULL;
-  CFDataRef plain_data = NULL;
-  CFDataRef cipher_data = NULL;
-  CFDictionaryRef attrs = NULL;
-  CFNumberRef key_bits = NULL;
-  SecKeyRef key = NULL;
-  CFErrorRef error = NULL;
-  int bits = 2048;
-  const void *keys[3];
-  const void *values[3];
-
-  if (!type0_reply || type0_reply_len < 6 || !outbuf || !outlen) return FALSE;
-  if (!username || !*username) {
-    rfbClientErr("auth33: missing VNC_USER for packet-1 generation\n");
-    return FALSE;
-  }
-  der_len = read_be_u32(type0_reply + 2);
-  if (6u + der_len > type0_reply_len) {
-    rfbClientErr("auth33: malformed type0 reply der_len=%u total=%u\n", (unsigned)der_len,
-                 (unsigned)type0_reply_len);
-    return FALSE;
-  }
-  der = type0_reply + 6;
-  if (!apple_hp_build_auth33_init_plaintext(username, plaintext, sizeof(plaintext),
-                                            &plaintext_len)) {
-    rfbClientErr("auth33: failed to build packet-1 plaintext for user '%s'\n", username);
-    return FALSE;
-  }
-
-  der_data = CFDataCreate(kCFAllocatorDefault, der, (CFIndex)der_len);
-  plain_data = CFDataCreate(kCFAllocatorDefault, plaintext, (CFIndex)plaintext_len);
-  key_bits = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bits);
-  keys[0] = kSecAttrKeyType;
-  values[0] = kSecAttrKeyTypeRSA;
-  keys[1] = kSecAttrKeyClass;
-  values[1] = kSecAttrKeyClassPublic;
-  keys[2] = kSecAttrKeySizeInBits;
-  values[2] = key_bits;
-  attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 3, &kCFTypeDictionaryKeyCallBacks,
-                             &kCFTypeDictionaryValueCallBacks);
-  if (!der_data || !plain_data || !key_bits || !attrs) goto fail;
-
-  key = SecKeyCreateWithData(der_data, attrs, &error);
-  if (!key) {
-    rfbClientErr("auth33: failed creating RSA public key from type0 reply\n");
-    goto fail;
-  }
-  if (!SecKeyIsAlgorithmSupported(key, kSecKeyOperationTypeEncrypt,
-                                  kSecKeyAlgorithmRSAEncryptionPKCS1)) {
-    rfbClientErr("auth33: RSA public key does not support PKCS1 encrypt\n");
-    goto fail;
-  }
-  cipher_data = SecKeyCreateEncryptedData(key, kSecKeyAlgorithmRSAEncryptionPKCS1, plain_data,
-                                          &error);
-  if (!cipher_data) {
-    rfbClientErr("auth33: packet-1 RSA encryption failed\n");
-    goto fail;
-  }
-
-  *outlen = (size_t)CFDataGetLength(cipher_data);
-  if (*outlen != APPLE_HP_AUTH33_KEY_MATERIAL_LEN || *outlen > outcap) {
-    rfbClientErr("auth33: packet-1 ciphertext length %zu (need %u)\n", *outlen,
-                 (unsigned)APPLE_HP_AUTH33_KEY_MATERIAL_LEN);
-    goto fail;
-  }
-  memcpy(outbuf, CFDataGetBytePtr(cipher_data), *outlen);
-
-  release_cfref(cipher_data);
-  release_cfref(key);
-  release_cfref(attrs);
-  release_cfref(key_bits);
-  release_cfref(plain_data);
-  release_cfref(der_data);
-  release_cfref(error);
-  return TRUE;
-
-fail:
-  release_cfref(cipher_data);
-  release_cfref(key);
-  release_cfref(attrs);
-  release_cfref(key_bits);
-  release_cfref(plain_data);
-  release_cfref(der_data);
-  release_cfref(error);
-  return FALSE;
-}
-#else
-static rfbBool build_auth33_init_key_material(const uint8_t *type0_reply, uint32_t type0_reply_len,
-                                              uint8_t *outbuf, size_t outcap, size_t *outlen) {
-  (void)type0_reply;
-  (void)type0_reply_len;
-  (void)outbuf;
-  (void)outcap;
-  (void)outlen;
-  return FALSE;
-}
-#endif
 
 static int parse_u32_env(const char *name, uint32_t *out) {
   const char *s = getenv(name);
@@ -1653,6 +1112,7 @@ static int apple_hp_enable_transport(rfbClient *client, const uint8_t *next_key,
 static int configure_apple_hp_mode(rfbClient *client) {
   if (!g_runtime.apple_hp_mode || !client) return 1;
 
+  rfbClientEnableAppleHighPerf(client, TRUE);
   client->appData.deferInitialSetup = TRUE;
   client->appData.hasClientInitFlags = TRUE;
   client->appData.clientInitFlags = 0xC1;
@@ -3035,105 +2495,6 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
 }
 #endif
 
-static rfbBool maybe_consume_auth33_server_final(rfbClient *client) {
-  uint8_t hdr[4];
-  uint32_t n = 0;
-  uint8_t *buf = NULL;
-  int wm = WaitForMessage(client, 1500000);
-  if (wm <= 0) return TRUE;
-  ssize_t r = recv(client->sock, (char *)hdr, sizeof(hdr), MSG_PEEK);
-  if (r < 4) return TRUE;
-  n = read_be_u32(hdr);
-  if (n < 16 || n > 4096) return TRUE;
-  if (!ReadFromRFBServer(client, (char *)hdr, 4)) return FALSE;
-  buf = (uint8_t *)malloc(n);
-  if (!buf) return FALSE;
-  if (!ReadFromRFBServer(client, (char *)buf, n)) {
-    free(buf);
-    return FALSE;
-  }
-  free(buf);
-  return TRUE;
-}
-
-static rfbBool handle_auth33_exchange(rfbClient *client, uint32_t authScheme) {
-  uint8_t outbuf[8192];
-  uint8_t keyreq[APPLE_HP_AUTH33_KEY_REQUEST_PACKET_LEN];
-  uint8_t init_key_material[APPLE_HP_AUTH33_KEY_MATERIAL_LEN];
-  uint8_t typebuf[2];
-  uint8_t *type0_reply = NULL;
-  uint8_t *inbuf = NULL;
-  size_t init_key_len = 0;
-  size_t outlen = APPLE_HP_AUTH33_INIT_PACKET_LEN;
-  uint32_t type0_reply_len = 0;
-  uint32_t inlen = 0;
-  uint16_t packet_version = 0x0100;
-  uint16_t auth_type = 0x0002;
-  uint16_t aux_type = 0x0100;
-  uint16_t selector_type = 0x0021;
-
-  (void)authScheme;
-  memset(outbuf, 0, sizeof(outbuf));
-  /* auth33 on macOS expects a one-byte sub-auth selector before RSA1 payload. */
-  typebuf[0] = (uint8_t)(selector_type & 0xff);
-  rfbClientLog("auth33: sending sub-auth selector byte=0x%02x\n", typebuf[0]);
-  if (!WriteToRFBServer(client, (const char *)typebuf, 1)) return FALSE;
-
-  if (!apple_hp_build_auth33_rsa1_key_request_packet(keyreq, sizeof(keyreq), packet_version)) {
-    rfbClientErr("auth33: failed to build RSA1 key request packet\n");
-    return FALSE;
-  }
-  rfbClientLog("auth33: sending type0 key request (%zu bytes)\n", sizeof(keyreq));
-  if (!WriteToRFBServer(client, (const char *)keyreq, sizeof(keyreq))) return FALSE;
-  if (!read_auth33_length_prefixed_blob(client, &type0_reply, &type0_reply_len, "type0 reply")) {
-    return FALSE;
-  }
-
-  memset(init_key_material, 0, sizeof(init_key_material));
-  if (build_auth33_init_key_material(type0_reply, type0_reply_len, init_key_material,
-                                     sizeof(init_key_material), &init_key_len)) {
-    rfbClientLog("auth33: using in-process packet-1 ciphertext generation\n");
-  } else {
-    rfbClientErr("auth33: failed to generate packet-1 ciphertext in process\n");
-    free(type0_reply);
-    return FALSE;
-  }
-  free(type0_reply);
-  type0_reply = NULL;
-
-  if (!apple_hp_build_auth33_rsa1_init_packet(outbuf, sizeof(outbuf), packet_version, auth_type,
-                                              aux_type, init_key_material,
-                                              sizeof(init_key_material))) {
-    rfbClientErr("auth33: failed to build RSA1 init packet\n");
-    return FALSE;
-  }
-  rfbClientLog("auth33: sending type2 init blob (%zu bytes) packet_ver=0x%04x auth_type=0x%04x "
-               "aux_type=0x%04x\n",
-               outlen, packet_version, auth_type, aux_type);
-  if (!WriteToRFBServer(client, (const char *)outbuf, (unsigned int)outlen)) return FALSE;
-
-  if (!read_auth33_length_prefixed_blob(client, &inbuf, &inlen, "server challenge")) return FALSE;
-  if (inlen >= 16 && memcmp(inbuf + 6, "RSA1", 4) == 0) {
-    rfbClientLog("auth33: server challenge has RSA1 envelope\n");
-  }
-
-  if (auth33_build_packet2_candidate(client, inbuf, inlen, outbuf, sizeof(outbuf), &outlen)) {
-    rfbClientLog("auth33: sending in-process response (%zu bytes)\n", outlen);
-    free(inbuf);
-    if (!WriteToRFBServer(client, (const char *)outbuf, (unsigned int)outlen)) return FALSE;
-    if (!maybe_consume_auth33_server_final(client)) return FALSE;
-    return TRUE;
-  }
-  free(inbuf);
-
-  rfbClientErr("auth33: failed to generate step-2 response in process\n");
-  return FALSE;
-}
-
-static const uint32_t kAuth33ExtSchemes[] = {33, 0};
-static rfbClientProtocolExtension kAuth33Ext = {
-    NULL, NULL, NULL, NULL, kAuth33ExtSchemes, handle_auth33_exchange};
-
 static int kHighPerfProbeEncodings[] = {0x44f, 0x450, 0x451, 0x453, 0x455, 0x456, 0x3f2, 0};
 
 static const char *apple_hp_rect_encoding_name(int32_t encoding) {
@@ -3174,20 +2535,24 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
 
   if (!client || !rect) return FALSE;
   if ((uint32_t)rect->encoding == 0x44f) {
+    const uint8_t *session_key = NULL;
+    size_t session_key_len = 0;
     if (!ReadFromRFBServer(client, (char *)buf, sizeof(buf))) return FALSE;
 
     g_hp.rekey_seen = 1;
-    if (!g_hp.auth33_wrap_key_ready) {
-      rfbClientErr("apple-hp: no auth33 wrap key available; cannot decrypt 0x44f\n");
+    if (!rfbClientGetAppleSessionKey(client, &session_key, &session_key_len) || session_key_len < 16) {
+      rfbClientErr("apple-hp: no Apple session key available; cannot decrypt 0x44f\n");
       return FALSE;
     }
 
     counter = read_be_u32(buf);
-    if (!aes_ecb_decrypt_block(g_hp.auth33_wrap_key, buf + 4, next_key)) return FALSE;
-    if (!aes_ecb_decrypt_block(g_hp.auth33_wrap_key, buf + 20, next_iv)) return FALSE;
+    if (!aes_ecb_decrypt_block(session_key, buf + 4, next_key)) return FALSE;
+    if (!aes_ecb_decrypt_block(session_key, buf + 20, next_iv)) return FALSE;
     if (!send_post_rekey_set_encryption_stage2(client)) return FALSE;
-    memcpy(g_hp.auth33_wrap_key, next_key, sizeof(g_hp.auth33_wrap_key));
-    g_hp.auth33_wrap_key_ready = 1;
+    memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
+    memcpy(client->appleSessionKey, next_key, 16);
+    client->appleSessionKeyLen = 16;
+    client->appleSessionKeyReady = TRUE;
     client->suppressNextIncrementalRequest = TRUE;
     if (!apple_hp_enable_transport(client, next_key, next_iv, counter)) return FALSE;
     if (!send_display_configuration_blob(client)) return FALSE;
@@ -3368,10 +2733,10 @@ static void configure_auth_schemes(rfbClient *client) {
     free(tmp);
   }
 
-  /* Default: ARD first, then common fallback paths. */
+  /* Default: built-in Apple RSA/SRP first, then legacy ARD, then common fallback paths. */
   {
     uint32_t auth_schemes[] = {
-      rfbARD, rfbVeNCrypt, rfbTLS, rfbVncAuth, rfbNoAuth, 0
+      rfbAppleAuthRSA_SRP, rfbARD, rfbVeNCrypt, rfbTLS, rfbVncAuth, rfbNoAuth, 0
     };
     SetClientAuthSchemes(client, auth_schemes, -1);
   }
@@ -3601,7 +2966,6 @@ int main(int argc, char **argv) {
   client->GotXCutText = on_cut_text;
   client->GotCursorShape = on_cursor_shape;
   client->GetCredential = get_credential;
-  rfbClientRegisterExtension(&kAuth33Ext);
   rfbClientRegisterExtension(&kHighPerfProbeExt);
   if (!configure_apple_hp_mode(client)) return 1;
 

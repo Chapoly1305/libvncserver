@@ -63,6 +63,7 @@
 #else
 #include "minilzo.h"
 #endif
+#include "apple.h"
 #include "tls.h"
 
 #define MAX_TEXTCHAT_SIZE 10485760 /* 10MB */
@@ -519,7 +520,9 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
 #ifdef LIBVNCSERVER_HAVE_SASL
             tAuth[loop]==rfbSASL ||
 #endif /* LIBVNCSERVER_HAVE_SASL */
-            ((tAuth[loop]==rfbARD || tAuth[loop]==rfbUltraMSLogonII) && client->GetCredential))
+            ((tAuth[loop]==rfbARD || tAuth[loop]==rfbAppleAuthRSA_SRP ||
+              tAuth[loop]==rfbAppleAuthKerberos || tAuth[loop]==rfbAppleAuthDirectSrp ||
+              tAuth[loop]==rfbUltraMSLogonII) && client->GetCredential))
         {
             if (!subAuth && client->clientAuthSchemes)
             {
@@ -1084,9 +1087,16 @@ InitialiseRFBConnection(rfbClient* client)
     if (!HandleMSLogonAuth(client)) return FALSE;
     break;
 
-  case rfbARD:
-    if (!HandleARDAuth(client)) return FALSE;
-    break;
+	  case rfbARD:
+	    if (!HandleARDAuth(client)) return FALSE;
+	    break;
+
+	  case rfbAppleAuthRSA_SRP:
+	  case rfbAppleAuthKerberos:
+	  case rfbAppleAuthDirectSrp:
+	    if (!rfbClientHandleAppleAuth(client, authScheme)) return FALSE;
+	    if (!rfbHandleAuthResult(client)) return FALSE;
+	    break;
 
   case rfbTLS:
     if (!HandleAnonTLSAuth(client)) return FALSE;
