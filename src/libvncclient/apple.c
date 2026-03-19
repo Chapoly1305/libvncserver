@@ -101,26 +101,6 @@ static const char *auth35_getenv_first(const char *a, const char *b)
   return NULL;
 }
 
-static int auth36_repro_mode(void)
-{
-  const char *value = getenv("VNC_APPLE_AUTH36_REPRO");
-
-  if (!value || !*value) return 0;
-  return atoi(value);
-}
-
-static int auth36_repro_repeat_count(void)
-{
-  const char *value = getenv("VNC_APPLE_AUTH36_REPEAT");
-  int n;
-
-  if (!value || !*value) return 1;
-  n = atoi(value);
-  if (n < 1) return 1;
-  if (n > 16) return 16;
-  return n;
-}
-
 static rfbBool read_length_prefixed_blob(rfbClient *client, uint8_t **outbuf,
                                          uint32_t *outlen, const char *what)
 {
@@ -153,8 +133,6 @@ static rfbBool read_length_prefixed_blob(rfbClient *client, uint8_t **outbuf,
 
 static rfbBool auth35_send_length_prefixed_blob(rfbClient *client, const uint8_t *buf, size_t len,
                                                 const char *what);
-static rfbBool auth36_send_custom_blob(rfbClient *client, const uint8_t *buf, size_t len,
-                                       uint32_t wire_len, const char *what);
 
 static rfbBool maybe_consume_auth33_server_final(rfbClient *client)
 {
@@ -258,9 +236,6 @@ static int auth33_parse_challenge_fields(const uint8_t *buf, size_t n, uint32_t 
     }
     off = 10;
   } else if (auth_type == rfbAppleAuthDirectSrp) {
-    if (auth36_repro_mode() == 2) {
-      off = 0;
-    } else
     if (n < 4 || read_be_u32(buf) != n - 4) {
       rfbClientErr("apple auth%u: direct SRP challenge inner length mismatch (len=%lu, inner=%u)\n",
                    auth_type, (unsigned long)n, n >= 4 ? read_be_u32(buf) : 0);
@@ -464,11 +439,12 @@ static int build_auth36_branch_entry_packet(const char *username, uint8_t *out, 
   if (!username || !out || !packet_len) return 0;
   if (!build_auth33_init_plaintext(username, plaintext, sizeof(plaintext), &plaintext_len))
     return 0;
-  if (out_len < 4 + plaintext_len) return 0;
+  if (out_len < 1 + 4 + plaintext_len) return 0;
 
-  write_be_u32(out, (uint32_t)plaintext_len);
-  memcpy(out + 4, plaintext, plaintext_len);
-  *packet_len = 4 + plaintext_len;
+  out[0] = (uint8_t)rfbAppleAuthDirectSrp;
+  write_be_u32(out + 1, (uint32_t)plaintext_len);
+  memcpy(out + 5, plaintext, plaintext_len);
+  *packet_len = 1 + 4 + plaintext_len;
   return 1;
 }
 
@@ -970,51 +946,14 @@ static rfbBool HandleAppleAuth36(rfbClient *client)
                                 &response_inner_len)) {
     goto done;
   }
-  if (auth36_repro_mode() == 1 || auth36_repro_mode() == 2) {
-    if (response_inner_len > 0xffffffffu) goto done;
-    memcpy(response, response_inner, response_inner_len);
-    response_len = response_inner_len;
-    rfbClientLog("apple auth36: repro mode %d malformed response len=%lu\n",
-                 auth36_repro_mode(), (unsigned long)response_len);
-  } else {
-    if (response_inner_len > 0xffffffffu || response_inner_len + 4 > sizeof(response)) goto done;
-    write_be_u32(response, (uint32_t)response_inner_len);
-    memcpy(response + 4, response_inner, response_inner_len);
-    response_len = response_inner_len + 4;
-    rfbClientLog("apple auth36: response inner len=%lu wire body len=%lu\n",
-                 (unsigned long)response_inner_len, (unsigned long)response_len);
-  }
-  if (auth36_repro_mode() == 3) {
-    if (response_inner_len > 0xffffffffu) goto done;
-    memcpy(response, response_inner, response_inner_len);
-    response_len = response_inner_len;
-    rfbClientLog("apple auth36: repro mode 3 body=%lu outer=%lu\n", (unsigned long)response_len,
-                 (unsigned long)(response_len + 4));
-    if (!auth36_send_custom_blob(client, response, response_len, (uint32_t)(response_len + 4),
-                                 "auth36 response"))
-      goto done;
-  } else if (auth36_repro_mode() == 4) {
-    if (response_inner_len > 0xffffffffu || response_inner_len + 4 > sizeof(response)) goto done;
-    write_be_u32(response, (uint32_t)response_inner_len);
-    memcpy(response + 4, response_inner, response_inner_len);
-    response_len = response_inner_len + 4;
-    rfbClientLog("apple auth36: repro mode 4 body=%lu outer=%lu\n", (unsigned long)response_len,
-                 (unsigned long)response_inner_len);
-    if (!auth36_send_custom_blob(client, response, response_len, (uint32_t)response_inner_len,
-                                 "auth36 response"))
-      goto done;
-  } else {
-    int repeats = auth36_repro_repeat_count();
-    int i;
-
-    for (i = 0; i < repeats; ++i) {
-      if (!auth35_send_length_prefixed_blob(client, response, response_len, "auth36 response"))
-        goto done;
-      if (repeats > 1) {
-        rfbClientLog("apple auth36: repeated response %d/%d\n", i + 1, repeats);
-      }
-    }
-  }
+  if (response_inner_len > 0xffffffffu || response_inner_len + 4 > sizeof(response)) goto done;
+  write_be_u32(response, (uint32_t)response_inner_len);
+  memcpy(response + 4, response_inner, response_inner_len);
+  response_len = response_inner_len + 4;
+  rfbClientLog("apple auth36: response inner len=%lu wire body len=%lu\n",
+               (unsigned long)response_inner_len, (unsigned long)response_len);
+  if (!auth35_send_length_prefixed_blob(client, response, response_len, "auth36 response"))
+    goto done;
   if (!read_length_prefixed_blob(client, &final_token, &final_token_len, "auth36 final token")) goto done;
   rfbClientLog("apple auth36: final token len=%u\n", final_token_len);
 
@@ -1070,24 +1009,6 @@ static rfbBool auth35_send_length_prefixed_blob(rfbClient *client, const uint8_t
   }
   if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)len)) {
     rfbClientErr("apple auth35: failed writing %s body\n", what);
-    return FALSE;
-  }
-  return TRUE;
-}
-
-static rfbBool auth36_send_custom_blob(rfbClient *client, const uint8_t *buf, size_t len,
-                                       uint32_t wire_len, const char *what)
-{
-  uint8_t hdr[4];
-
-  if (!client || !buf || len == 0) return FALSE;
-  write_be_u32(hdr, wire_len);
-  if (!WriteToRFBServer(client, (const char *)hdr, sizeof(hdr))) {
-    rfbClientErr("apple auth36: failed writing %s length\n", what);
-    return FALSE;
-  }
-  if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)len)) {
-    rfbClientErr("apple auth36: failed writing %s body\n", what);
     return FALSE;
   }
   return TRUE;

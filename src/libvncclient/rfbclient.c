@@ -545,8 +545,11 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
             if (flag)
             {
                 rfbClientLog("Selecting security type %d (%d/%d in the list)\n", authScheme, loop, count);
-                /* send back a single byte indicating which security type to use */
-                if (!WriteToRFBServer(client, (char *)&tAuth[loop], 1)) return FALSE;
+                /* auth36 sends its selector together with its branch-entry payload */
+                if (tAuth[loop] != rfbAppleAuthDirectSrp) {
+                  /* send back a single byte indicating which security type to use */
+                  if (!WriteToRFBServer(client, (char *)&tAuth[loop], 1)) return FALSE;
+                }
             }
         }
     }
