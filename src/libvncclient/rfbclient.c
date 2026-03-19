@@ -818,6 +818,8 @@ HandleARDAuth(rfbClient *client)
   rfbCredential *cred = NULL;
   rfbBool result = FALSE;
 
+  rfbClientResetAppleAuth(client);
+
   /* Step 1: Read the authentication material from the socket.
      A two-byte generator value, a two-byte key length value. */
   if (!ReadFromRFBServer(client, (char *)gen, 2)) {
@@ -871,6 +873,11 @@ HandleARDAuth(rfbClient *client)
       rfbClientErr("HandleARDAuth: hashing shared key failed\n");
       goto out;
   }
+  memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
+  memcpy(client->appleSessionKey, shared, MD5_HASH_SIZE);
+  client->appleSessionKeyLen = MD5_HASH_SIZE;
+  client->appleSessionKeyReady = TRUE;
+  client->appleAuthType = rfbARD;
 
   /* Step 5: Pack the username and password into a 128-byte
      plaintext "userpass" structure: { username[64], password[64] }.
@@ -919,6 +926,9 @@ HandleARDAuth(rfbClient *client)
  out:
   if (cred)
     FreeUserCredential(cred);
+
+  if (!result)
+    rfbClientResetAppleAuth(client);
 
   free(mod);
   free(shared);
