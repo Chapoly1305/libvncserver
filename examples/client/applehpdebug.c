@@ -71,6 +71,11 @@ struct apple_hp_runtime_options {
   int apple_hp_mode;
 };
 
+struct apple_hp_known_krb_realm {
+  const char *host;
+  const char *realm;
+};
+
 struct apple_hp_transport_state {
   int active;
   uint8_t wrap_key[16];
@@ -375,6 +380,82 @@ static int env_flag_default_true(const char *name) {
   const char *s = getenv(name);
   if (!s || !*s) return 1;
   return env_flag_enabled(name);
+}
+
+static const char *apple_hp_getenv_first(const char *a, const char *b) {
+  const char *s = NULL;
+  if (a) {
+    s = getenv(a);
+    if (s && *s) return s;
+  }
+  if (b) {
+    s = getenv(b);
+    if (s && *s) return s;
+  }
+  return NULL;
+}
+
+static void apple_hp_normalize_host(const char *host, char *out, size_t out_cap) {
+  size_t n = 0;
+  const char *start = host;
+  const char *end = NULL;
+
+  if (!out || out_cap == 0) return;
+  out[0] = '\0';
+  if (!host || !*host) return;
+
+  if (*start == '[') {
+    start++;
+    end = strchr(start, ']');
+    if (!end) end = start + strlen(start);
+  } else {
+    end = start + strlen(start);
+    if (strchr(start, ':') && !strchr(start, '.')) {
+      /* likely raw IPv6 literal without brackets */
+      end = start + strlen(start);
+    } else {
+      const char *colon = strrchr(start, ':');
+      if (colon) end = colon;
+    }
+  }
+
+  while (end > start && (end[-1] == '.' || end[-1] == ' ' || end[-1] == '\t')) end--;
+  while (start < end && (*start == ' ' || *start == '\t')) start++;
+  for (; start < end && n + 1 < out_cap; ++start) {
+    unsigned char ch = (unsigned char)*start;
+    if (ch >= 'A' && ch <= 'Z') ch = (unsigned char)(ch - 'A' + 'a');
+    out[n++] = (char)ch;
+  }
+  out[n] = '\0';
+}
+
+static void apple_hp_seed_known_auth35_realm(const char *host) {
+  static const struct apple_hp_known_krb_realm kKnown[] = {
+      {"alexs-mac-mini.local", "LKDC:SHA1.896110981E604592DBD4B2A3A0C367563A38637E"},
+  };
+  char normalized[512];
+  size_t i;
+
+  if (!host || !*host) return;
+  if (apple_hp_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM")) return;
+  if (apple_hp_getenv_first("VNC_APPLE_KRB_SERVICE_PRINCIPAL",
+                            "LIBVNCCLIENT_APPLE_KRB_SERVICE_PRINCIPAL"))
+    return;
+  if (apple_hp_getenv_first("VNC_APPLE_KRB_CLIENT_PRINCIPAL",
+                            "LIBVNCCLIENT_APPLE_KRB_CLIENT_PRINCIPAL"))
+    return;
+
+  apple_hp_normalize_host(host, normalized, sizeof(normalized));
+  if (!normalized[0]) return;
+
+  for (i = 0; i < sizeof(kKnown) / sizeof(kKnown[0]); ++i) {
+    if (strcmp(normalized, kKnown[i].host) == 0) {
+      setenv("VNC_APPLE_KRB_REALM", kKnown[i].realm, 0);
+      rfbClientLog("apple auth35: seeded VNC_APPLE_KRB_REALM=%s for host %s\n",
+                   kKnown[i].realm, normalized);
+      return;
+    }
+  }
 }
 
 static int apple_hp_simple_1080p_enabled(void) {
@@ -2980,6 +3061,8 @@ int main(int argc, char **argv) {
     seconds = atoi(argv[3]);
     if (seconds <= 0) seconds = 120;
   }
+
+  apple_hp_seed_known_auth35_realm(host);
 
   /* libvncclient expects a single host[:port] positional target. */
   if (argc >= 3) {

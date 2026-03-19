@@ -421,6 +421,15 @@ ConnectClientToTcpAddr6WithTimeout(const char *hostname, int port, unsigned int 
   sock = RFB_INVALID_SOCKET;
   while (res)
   {
+    if (res->ai_family == AF_INET6) {
+      const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)res->ai_addr;
+
+      if (sin6 && IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
+        res = res->ai_next;
+        continue;
+      }
+    }
+
     sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock != RFB_INVALID_SOCKET)
     {
@@ -433,13 +442,10 @@ ConnectClientToTcpAddr6WithTimeout(const char *hostname, int port, unsigned int 
 #endif
           if ((errno == EWOULDBLOCK || errno == EINPROGRESS) && sock_wait_for_connected(sock, timeout))
             break;
-          rfbCloseSocket(sock);
-          sock = RFB_INVALID_SOCKET;
         }
-      } else {
-        rfbCloseSocket(sock);
-        sock = RFB_INVALID_SOCKET;
       }
+      rfbCloseSocket(sock);
+      sock = RFB_INVALID_SOCKET;
     }
     res = res->ai_next;
   }
@@ -895,4 +901,3 @@ int WaitForMessage(rfbClient* client,unsigned int usecs)
 
   return num;
 }
-

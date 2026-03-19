@@ -9,6 +9,7 @@
 #include <CommonCrypto/CommonKeyDerivation.h>
 #include <CommonCrypto/CommonRandom.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <GSS/GSS.h>
 #include <Security/Security.h>
 #endif
 
@@ -85,6 +86,41 @@ static void FreeAppleUserCredential(rfbCredential *cred)
   free(cred);
 }
 
+static const char *auth35_getenv_first(const char *a, const char *b)
+{
+  const char *value = NULL;
+
+  if (a) {
+    value = getenv(a);
+    if (value && *value) return value;
+  }
+  if (b) {
+    value = getenv(b);
+    if (value && *value) return value;
+  }
+  return NULL;
+}
+
+static int auth36_repro_mode(void)
+{
+  const char *value = getenv("VNC_APPLE_AUTH36_REPRO");
+
+  if (!value || !*value) return 0;
+  return atoi(value);
+}
+
+static int auth36_repro_repeat_count(void)
+{
+  const char *value = getenv("VNC_APPLE_AUTH36_REPEAT");
+  int n;
+
+  if (!value || !*value) return 1;
+  n = atoi(value);
+  if (n < 1) return 1;
+  if (n > 16) return 16;
+  return n;
+}
+
 static rfbBool read_length_prefixed_blob(rfbClient *client, uint8_t **outbuf,
                                          uint32_t *outlen, const char *what)
 {
@@ -114,6 +150,11 @@ static rfbBool read_length_prefixed_blob(rfbClient *client, uint8_t **outbuf,
   *outlen = n;
   return TRUE;
 }
+
+static rfbBool auth35_send_length_prefixed_blob(rfbClient *client, const uint8_t *buf, size_t len,
+                                                const char *what);
+static rfbBool auth36_send_custom_blob(rfbClient *client, const uint8_t *buf, size_t len,
+                                       uint32_t wire_len, const char *what);
 
 static rfbBool maybe_consume_auth33_server_final(rfbClient *client)
 {
@@ -154,10 +195,9 @@ struct auth33_challenge_fields {
   size_t options_len;
 };
 
-static int auth33_parse_challenge_fields(const uint8_t *buf, size_t n,
-                                         struct auth33_challenge_fields *out)
+static int auth33_parse_challenge_fields_at(const uint8_t *buf, size_t n, size_t off,
+                                            struct auth33_challenge_fields *out)
 {
-  size_t off = 10;
   uint16_t field_len;
 
   if (!buf || !out || n < 11) return 0;
@@ -200,6 +240,39 @@ static int auth33_parse_challenge_fields(const uint8_t *buf, size_t n,
   if (off + field_len > n) return 0;
   out->options = buf + off;
   out->options_len = field_len;
+  off += field_len;
+  return off == n;
+}
+
+static int auth33_parse_challenge_fields(const uint8_t *buf, size_t n, uint32_t auth_type,
+                                         struct auth33_challenge_fields *out)
+{
+  size_t off = 0;
+
+  if (!buf || !out) return 0;
+  if (auth_type == rfbAppleAuthRSA_SRP) {
+    if (n < 10 || memcmp(buf + 2, "RSA1", 4) != 0) {
+      rfbClientErr("apple auth%u: RSA1 challenge header missing or short (len=%lu)\n", auth_type,
+                   (unsigned long)n);
+      return 0;
+    }
+    off = 10;
+  } else if (auth_type == rfbAppleAuthDirectSrp) {
+    if (auth36_repro_mode() == 2) {
+      off = 0;
+    } else
+    if (n < 4 || read_be_u32(buf) != n - 4) {
+      rfbClientErr("apple auth%u: direct SRP challenge inner length mismatch (len=%lu, inner=%u)\n",
+                   auth_type, (unsigned long)n, n >= 4 ? read_be_u32(buf) : 0);
+      return 0;
+    }
+    off = 4;
+  }
+  if (!auth33_parse_challenge_fields_at(buf, n, off, out)) {
+    rfbClientErr("apple auth%u: failed to parse SRP challenge fields (len=%lu, off=%lu)\n",
+                 auth_type, (unsigned long)n, (unsigned long)off);
+    return 0;
+  }
   return 1;
 }
 
@@ -261,6 +334,43 @@ static uint8_t *auth33_utf16_bytes(const char *s, int big_endian, size_t *out_le
 static void release_cfref(CFTypeRef ref)
 {
   if (ref) CFRelease(ref);
+}
+
+static void auth35_log_gss_status_1(const char *prefix, OM_uint32 code, int status_type)
+{
+  OM_uint32 msg_ctx = 0;
+  OM_uint32 minor = 0;
+  gss_buffer_desc msg = GSS_C_EMPTY_BUFFER;
+
+  do {
+    if (gss_display_status(&minor, code, status_type, GSS_C_NO_OID, &msg_ctx, &msg) != GSS_S_COMPLETE)
+      break;
+    rfbClientErr("%s%s\n", prefix, msg.value ? (const char *)msg.value : "<empty>");
+    gss_release_buffer(&minor, &msg);
+  } while (msg_ctx != 0);
+}
+
+static void auth35_log_gss_error(const char *prefix, OM_uint32 major, OM_uint32 minor)
+{
+  char line[256];
+
+  snprintf(line, sizeof(line), "%smajor: ", prefix);
+  auth35_log_gss_status_1(line, major, GSS_C_GSS_CODE);
+  snprintf(line, sizeof(line), "%sminor: ", prefix);
+  auth35_log_gss_status_1(line, minor, GSS_C_MECH_CODE);
+}
+
+static void auth35_log_cferror(const char *prefix, CFErrorRef error)
+{
+  CFStringRef desc = NULL;
+  char buf[256];
+
+  if (!error) return;
+  desc = CFErrorCopyDescription(error);
+  if (!desc) return;
+  if (CFStringGetCString(desc, buf, sizeof(buf), kCFStringEncodingUTF8))
+    rfbClientErr("%s%s\n", prefix, buf);
+  CFRelease(desc);
 }
 #endif
 
@@ -342,6 +452,23 @@ static int build_auth33_init_plaintext(const char *username, uint8_t *out, size_
   p += 2;
   *p = 0;
   *plaintext_len = total_plain_len;
+  return 1;
+}
+
+static int build_auth36_branch_entry_packet(const char *username, uint8_t *out, size_t out_len,
+                                            size_t *packet_len)
+{
+  uint8_t plaintext[512];
+  size_t plaintext_len = 0;
+
+  if (!username || !out || !packet_len) return 0;
+  if (!build_auth33_init_plaintext(username, plaintext, sizeof(plaintext), &plaintext_len))
+    return 0;
+  if (out_len < 4 + plaintext_len) return 0;
+
+  write_be_u32(out, (uint32_t)plaintext_len);
+  memcpy(out + 4, plaintext, plaintext_len);
+  *packet_len = 4 + plaintext_len;
   return 1;
 }
 
@@ -432,12 +559,13 @@ static rfbBool build_auth33_init_key_material(const char *username, const uint8_
 }
 #endif
 
-static int auth33_build_packet2_candidate(rfbClient *client, const char *password,
-                                          const uint8_t *challenge, uint32_t challenge_len,
-                                          uint8_t *outbuf, size_t outcap, size_t *outlen)
+static int auth33_build_step2_inner(rfbClient *client, uint32_t auth_type, const char *password,
+                                    const uint8_t *challenge, uint32_t challenge_len,
+                                    uint8_t *outbuf, size_t outcap, size_t *outlen)
 {
 #if !defined(__APPLE__) || !defined(LIBVNCCLIENT_APPLE_HAS_OPENSSL_BN)
   (void)client;
+  (void)auth_type;
   (void)password;
   (void)challenge;
   (void)challenge_len;
@@ -476,7 +604,6 @@ static int auth33_build_packet2_candidate(rfbClient *client, const char *passwor
   uint8_t *K = NULL;
   uint8_t *nonce16 = NULL;
   uint8_t *inner = NULL;
-  uint8_t *wrapped = NULL;
   uint8_t *pbkdf2_pass = NULL;
   uint8_t *pw_utf16le = NULL;
   uint8_t *pw_utf16be = NULL;
@@ -494,15 +621,13 @@ static int auth33_build_packet2_candidate(rfbClient *client, const char *passwor
   size_t x_len;
   size_t opt_len;
   size_t inner_len;
-  size_t wrapped_len;
-  size_t wrapped_body_len;
   size_t k_len;
   int ok = FALSE;
 
   (void)pw_utf16le;
   (void)pw_utf16be;
   if (!client || !password || !*password || !challenge || !challenge_len || !outbuf || !outlen) return FALSE;
-  if (!auth33_parse_challenge_fields(challenge, challenge_len, &parsed)) return FALSE;
+  if (!auth33_parse_challenge_fields(challenge, challenge_len, auth_type, &parsed)) return FALSE;
   password_len = strlen(password);
   pad_len = parsed.N_len;
   N = BN_bin2bn(parsed.N, (int)parsed.N_len, NULL);
@@ -525,17 +650,25 @@ static int auth33_build_packet2_candidate(rfbClient *client, const char *passwor
   Ap = (uint8_t *)malloc(pad_len);
   Bp = (uint8_t *)malloc(pad_len);
   if (!N || !g || !B || !a || !A || !x || !v || !k || !u || !ux || !exp || !tmp || !base || !S ||
-      !bn_ctx || !Np || !gp || !Ap || !Bp) goto done;
+      !bn_ctx || !Np || !gp || !Ap || !Bp) {
+    rfbClientErr("apple auth%u: BN allocation failed\n", auth_type);
+    goto done;
+  }
   if (!auth33_random_bigint(a, 512) || !BN_mod_exp(A, g, a, N, bn_ctx) ||
       !auth33_bn_to_pad(N, Np, pad_len) || !auth33_bn_to_pad(g, gp, pad_len) ||
       !auth33_bn_to_pad(B, Bp, pad_len) || !auth33_bn_to_pad(A, Ap, pad_len)) {
+    rfbClientErr("apple auth%u: failed generating or padding SRP public values\n", auth_type);
     goto done;
   }
 
   pbkdf2_pass = (uint8_t *)malloc(128);
-  if (!pbkdf2_pass) goto done;
+  if (!pbkdf2_pass) {
+    rfbClientErr("apple auth%u: PBKDF buffer allocation failed\n", auth_type);
+    goto done;
+  }
   if (!auth33_pbkdf2_sha512((const uint8_t *)password, password_len, parsed.salt, parsed.salt_len,
                             (uint32_t)parsed.iterations, pbkdf2_pass, 128)) {
+    rfbClientErr("apple auth%u: PBKDF2-SHA512 failed\n", auth_type);
     goto done;
   }
   pw_utf16le = auth33_utf16_bytes(password, 0, &x_len);
@@ -554,24 +687,45 @@ static int auth33_build_packet2_candidate(rfbClient *client, const char *passwor
   }
   x_len = sizeof(digest2);
   x_bytes = (uint8_t *)malloc(x_len);
-  if (!x_bytes) goto done;
+  if (!x_bytes) {
+    rfbClientErr("apple auth%u: x buffer allocation failed\n", auth_type);
+    goto done;
+  }
   memcpy(x_bytes, digest2, x_len);
-  if (!BN_bin2bn(x_bytes, (int)x_len, x)) goto done;
+  if (!BN_bin2bn(x_bytes, (int)x_len, x)) {
+    rfbClientErr("apple auth%u: BN_bin2bn(x) failed\n", auth_type);
+    goto done;
+  }
 
   auth33_sha512_2(digest, Np, pad_len, gp, pad_len);
-  if (!BN_bin2bn(digest, sizeof(digest), k)) goto done;
+  if (!BN_bin2bn(digest, sizeof(digest), k)) {
+    rfbClientErr("apple auth%u: BN_bin2bn(k) failed\n", auth_type);
+    goto done;
+  }
 
   auth33_sha512_2(digest, Ap, pad_len, Bp, pad_len);
-  if (!BN_bin2bn(digest, sizeof(digest), u)) goto done;
+  if (!BN_bin2bn(digest, sizeof(digest), u)) {
+    rfbClientErr("apple auth%u: BN_bin2bn(u) failed\n", auth_type);
+    goto done;
+  }
   if (!BN_mod_exp(v, g, x, N, bn_ctx) || !BN_mod_mul(tmp, k, v, N, bn_ctx) ||
       !BN_mod_sub(base, B, tmp, N, bn_ctx) || !BN_mul(ux, u, x, bn_ctx) ||
-      !BN_add(exp, a, ux) || !BN_mod_exp(S, base, exp, N, bn_ctx)) goto done;
+      !BN_add(exp, a, ux) || !BN_mod_exp(S, base, exp, N, bn_ctx)) {
+    rfbClientErr("apple auth%u: SRP shared secret computation failed\n", auth_type);
+    goto done;
+  }
 
   Sp = (uint8_t *)malloc(pad_len);
-  if (!Sp || !auth33_bn_to_pad(S, Sp, pad_len)) goto done;
+  if (!Sp || !auth33_bn_to_pad(S, Sp, pad_len)) {
+    rfbClientErr("apple auth%u: failed serializing shared secret\n", auth_type);
+    goto done;
+  }
   auth33_sha512_2(digest, Sp, pad_len, NULL, 0);
   K = (uint8_t *)malloc(sizeof(digest));
-  if (!K) goto done;
+  if (!K) {
+    rfbClientErr("apple auth%u: session hash buffer allocation failed\n", auth_type);
+    goto done;
+  }
   memcpy(K, digest, sizeof(digest));
   k_len = sizeof(digest);
   auth33_sha512_2(hN, Np, pad_len, NULL, 0);
@@ -590,12 +744,15 @@ static int auth33_build_packet2_candidate(rfbClient *client, const char *passwor
   opt_len = parsed.options_len;
   nonce16 = (uint8_t *)malloc(16);
   inner_len = 2 + pad_len + 1 + sizeof(m1) + 2 + opt_len + 1 + 16;
-  wrapped_body_len = 4 + inner_len;
-  wrapped_len = wrapped_body_len + 384;
   inner = (uint8_t *)malloc(inner_len);
-  wrapped = (uint8_t *)calloc(1, wrapped_len);
-  if (!nonce16 || !inner || !wrapped) goto done;
-  if (CCRandomGenerateBytes(nonce16, 16) != kCCSuccess) goto done;
+  if (!nonce16 || !inner) {
+    rfbClientErr("apple auth%u: response buffer allocation failed\n", auth_type);
+    goto done;
+  }
+  if (CCRandomGenerateBytes(nonce16, 16) != kCCSuccess) {
+    rfbClientErr("apple auth%u: nonce generation failed\n", auth_type);
+    goto done;
+  }
   {
     size_t off = 0;
     write_be_u16(inner + off, (uint16_t)pad_len);
@@ -612,23 +769,22 @@ static int auth33_build_packet2_candidate(rfbClient *client, const char *passwor
     inner[off++] = 16;
     memcpy(inner + off, nonce16, 16);
   }
-  write_be_u16(wrapped + 0, 0);
-  write_be_u16(wrapped + 2, (uint16_t)inner_len);
-  memcpy(wrapped + 4, inner, inner_len);
-  if (outcap < 14 + wrapped_len + 4) goto done;
-  write_be_u32(outbuf, (uint32_t)(10 + wrapped_len));
-  write_be_u16(outbuf + 4, 0x0100);
-  memcpy(outbuf + 6, "RSA1", 4);
-  write_be_u16(outbuf + 10, 0x0002);
-  write_be_u16(outbuf + 12, (uint16_t)wrapped_body_len);
-  memcpy(outbuf + 14, wrapped, wrapped_len);
-  *outlen = 14 + wrapped_len;
+  if (outcap < inner_len) {
+    rfbClientErr("apple auth%u: output buffer too small for response (%lu)\n", auth_type,
+                 (unsigned long)inner_len);
+    goto done;
+  }
+  memcpy(outbuf, inner, inner_len);
+  *outlen = inner_len;
   CC_SHA256(K, (CC_LONG)k_len, digest);
   memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
   memcpy(client->appleSessionKey, digest, 16);
   client->appleSessionKeyLen = 16;
   client->appleSessionKeyReady = TRUE;
-  client->appleAuthType = rfbAppleAuthRSA_SRP;
+  client->appleAuthType = auth_type;
+  if (auth_type == rfbAppleAuthDirectSrp) {
+    rfbClientLog("apple auth36: prepared direct SRP session key\n");
+  }
   ok = TRUE;
 
 done:
@@ -654,11 +810,51 @@ done:
   free(K);
   free(nonce16);
   free(inner);
-  free(wrapped);
   free(pbkdf2_pass);
   free(x_bytes);
   free(Sp);
   return ok;
+#endif
+}
+
+static int auth33_build_packet2_candidate(rfbClient *client, const char *password,
+                                          const uint8_t *challenge, uint32_t challenge_len,
+                                          uint8_t *outbuf, size_t outcap, size_t *outlen)
+{
+#if !defined(__APPLE__) || !defined(LIBVNCCLIENT_APPLE_HAS_OPENSSL_BN)
+  (void)client;
+  (void)password;
+  (void)challenge;
+  (void)challenge_len;
+  (void)outbuf;
+  (void)outcap;
+  (void)outlen;
+  return FALSE;
+#else
+  uint8_t inner[4096];
+  size_t inner_len = 0;
+  size_t wrapped_body_len;
+  size_t wrapped_len;
+
+  if (!auth33_build_step2_inner(client, rfbAppleAuthRSA_SRP, password, challenge, challenge_len,
+                                inner, sizeof(inner), &inner_len)) {
+    return FALSE;
+  }
+
+  wrapped_body_len = 4 + inner_len;
+  wrapped_len = wrapped_body_len + 384;
+  if (!outbuf || !outlen || outcap < 14 + wrapped_len) return FALSE;
+  memset(outbuf, 0, 14 + wrapped_len);
+  write_be_u16(outbuf + 14 + 0, 0);
+  write_be_u16(outbuf + 14 + 2, (uint16_t)inner_len);
+  memcpy(outbuf + 14 + 4, inner, inner_len);
+  write_be_u32(outbuf, (uint32_t)(10 + wrapped_len));
+  write_be_u16(outbuf + 4, 0x0100);
+  memcpy(outbuf + 6, "RSA1", 4);
+  write_be_u16(outbuf + 10, 0x0002);
+  write_be_u16(outbuf + 12, (uint16_t)wrapped_body_len);
+  *outlen = 14 + wrapped_len;
+  return TRUE;
 #endif
 }
 
@@ -734,6 +930,420 @@ done:
   return ok;
 }
 
+static rfbBool HandleAppleAuth36(rfbClient *client)
+{
+  uint8_t entry[1024];
+  uint8_t response_inner[4096];
+  uint8_t response[4100];
+  uint8_t *challenge = NULL;
+  uint8_t *final_token = NULL;
+  uint32_t challenge_len = 0;
+  uint32_t final_token_len = 0;
+  size_t entry_len = 0;
+  size_t response_inner_len = 0;
+  size_t response_len = 0;
+  rfbCredential *cred = NULL;
+  rfbBool ok = FALSE;
+
+  if (!client->GetCredential) {
+    rfbClientErr("apple auth36: GetCredential callback is not set\n");
+    return FALSE;
+  }
+  cred = client->GetCredential(client, rfbCredentialTypeUser);
+  if (!cred || !cred->userCredential.username || !cred->userCredential.password) {
+    rfbClientErr("apple auth36: reading credential failed\n");
+    FreeAppleUserCredential(cred);
+    return FALSE;
+  }
+
+  if (!build_auth36_branch_entry_packet(cred->userCredential.username, entry, sizeof(entry),
+                                        &entry_len)) {
+    goto done;
+  }
+  rfbClientLog("apple auth36: branch entry len=%lu\n", (unsigned long)entry_len);
+  if (!WriteToRFBServer(client, (const char *)entry, (unsigned int)entry_len)) goto done;
+
+  if (!read_length_prefixed_blob(client, &challenge, &challenge_len, "auth36 challenge")) goto done;
+  rfbClientLog("apple auth36: challenge len=%u\n", challenge_len);
+  if (!auth33_build_step2_inner(client, rfbAppleAuthDirectSrp, cred->userCredential.password,
+                                challenge, challenge_len, response_inner, sizeof(response_inner),
+                                &response_inner_len)) {
+    goto done;
+  }
+  if (auth36_repro_mode() == 1 || auth36_repro_mode() == 2) {
+    if (response_inner_len > 0xffffffffu) goto done;
+    memcpy(response, response_inner, response_inner_len);
+    response_len = response_inner_len;
+    rfbClientLog("apple auth36: repro mode %d malformed response len=%lu\n",
+                 auth36_repro_mode(), (unsigned long)response_len);
+  } else {
+    if (response_inner_len > 0xffffffffu || response_inner_len + 4 > sizeof(response)) goto done;
+    write_be_u32(response, (uint32_t)response_inner_len);
+    memcpy(response + 4, response_inner, response_inner_len);
+    response_len = response_inner_len + 4;
+    rfbClientLog("apple auth36: response inner len=%lu wire body len=%lu\n",
+                 (unsigned long)response_inner_len, (unsigned long)response_len);
+  }
+  if (auth36_repro_mode() == 3) {
+    if (response_inner_len > 0xffffffffu) goto done;
+    memcpy(response, response_inner, response_inner_len);
+    response_len = response_inner_len;
+    rfbClientLog("apple auth36: repro mode 3 body=%lu outer=%lu\n", (unsigned long)response_len,
+                 (unsigned long)(response_len + 4));
+    if (!auth36_send_custom_blob(client, response, response_len, (uint32_t)(response_len + 4),
+                                 "auth36 response"))
+      goto done;
+  } else if (auth36_repro_mode() == 4) {
+    if (response_inner_len > 0xffffffffu || response_inner_len + 4 > sizeof(response)) goto done;
+    write_be_u32(response, (uint32_t)response_inner_len);
+    memcpy(response + 4, response_inner, response_inner_len);
+    response_len = response_inner_len + 4;
+    rfbClientLog("apple auth36: repro mode 4 body=%lu outer=%lu\n", (unsigned long)response_len,
+                 (unsigned long)response_inner_len);
+    if (!auth36_send_custom_blob(client, response, response_len, (uint32_t)response_inner_len,
+                                 "auth36 response"))
+      goto done;
+  } else {
+    int repeats = auth36_repro_repeat_count();
+    int i;
+
+    for (i = 0; i < repeats; ++i) {
+      if (!auth35_send_length_prefixed_blob(client, response, response_len, "auth36 response"))
+        goto done;
+      if (repeats > 1) {
+        rfbClientLog("apple auth36: repeated response %d/%d\n", i + 1, repeats);
+      }
+    }
+  }
+  if (!read_length_prefixed_blob(client, &final_token, &final_token_len, "auth36 final token")) goto done;
+  rfbClientLog("apple auth36: final token len=%u\n", final_token_len);
+
+  ok = TRUE;
+
+done:
+  FreeAppleUserCredential(cred);
+  free(challenge);
+  free(final_token);
+  if (!ok) rfbClientResetAppleAuth(client);
+  return ok;
+}
+
+static rfbBool auth35_import_name(const char *value, gss_const_OID oid, gss_name_t *out_name,
+                                  const char *what)
+{
+#if !defined(__APPLE__)
+  (void)value;
+  (void)oid;
+  (void)out_name;
+  (void)what;
+  return FALSE;
+#else
+  OM_uint32 major = 0;
+  OM_uint32 minor = 0;
+  gss_buffer_desc buf = GSS_C_EMPTY_BUFFER;
+
+  if (!value || !out_name) return FALSE;
+  *out_name = GSS_C_NO_NAME;
+  buf.value = (void *)value;
+  buf.length = strlen(value);
+  major = gss_import_name(&minor, &buf, oid, out_name);
+  if (major != GSS_S_COMPLETE) {
+    char prefix[128];
+    snprintf(prefix, sizeof(prefix), "apple auth35: gss_import_name(%s) failed: ", what);
+    auth35_log_gss_error(prefix, major, minor);
+    return FALSE;
+  }
+  return TRUE;
+#endif
+}
+
+static rfbBool auth35_send_length_prefixed_blob(rfbClient *client, const uint8_t *buf, size_t len,
+                                                const char *what)
+{
+  uint8_t hdr[4];
+
+  if (!client || !buf || len == 0 || len > 0xffffffffu) return FALSE;
+  write_be_u32(hdr, (uint32_t)len);
+  if (!WriteToRFBServer(client, (const char *)hdr, sizeof(hdr))) {
+    rfbClientErr("apple auth35: failed writing %s length\n", what);
+    return FALSE;
+  }
+  if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)len)) {
+    rfbClientErr("apple auth35: failed writing %s body\n", what);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static rfbBool auth36_send_custom_blob(rfbClient *client, const uint8_t *buf, size_t len,
+                                       uint32_t wire_len, const char *what)
+{
+  uint8_t hdr[4];
+
+  if (!client || !buf || len == 0) return FALSE;
+  write_be_u32(hdr, wire_len);
+  if (!WriteToRFBServer(client, (const char *)hdr, sizeof(hdr))) {
+    rfbClientErr("apple auth36: failed writing %s length\n", what);
+    return FALSE;
+  }
+  if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)len)) {
+    rfbClientErr("apple auth36: failed writing %s body\n", what);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+#if defined(__APPLE__)
+static char *auth35_build_client_principal(const char *username)
+{
+  const char *override = auth35_getenv_first("VNC_APPLE_KRB_CLIENT_PRINCIPAL",
+                                             "LIBVNCCLIENT_APPLE_KRB_CLIENT_PRINCIPAL");
+  const char *realm = auth35_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM");
+  size_t need = 0;
+  char *out = NULL;
+
+  if (override) return strdup(override);
+  if (!username || !*username) return NULL;
+  if (strchr(username, '@')) return strdup(username);
+  if (!realm || !*realm) return NULL;
+  need = strlen(username) + 1 + strlen(realm) + 1;
+  out = (char *)malloc(need);
+  if (!out) return NULL;
+  snprintf(out, need, "%s@%s", username, realm);
+  return out;
+}
+
+static char *auth35_build_service_principal(void)
+{
+  const char *override = auth35_getenv_first("VNC_APPLE_KRB_SERVICE_PRINCIPAL",
+                                             "LIBVNCCLIENT_APPLE_KRB_SERVICE_PRINCIPAL");
+  const char *realm = auth35_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM");
+  size_t need = 0;
+  char *out = NULL;
+
+  if (override) return strdup(override);
+  if (!realm || !*realm) return NULL;
+  need = 4 + strlen(realm) + 1 + strlen(realm) + 1;
+  out = (char *)malloc(need);
+  if (!out) return NULL;
+  snprintf(out, need, "vnc/%s@%s", realm, realm);
+  return out;
+}
+
+static rfbBool auth35_set_session_key(rfbClient *client, const uint8_t *key, size_t len,
+                                      const char *source)
+{
+  if (!client || !key || len < 16) return FALSE;
+  memset(client->appleSessionKey, 0, sizeof(client->appleSessionKey));
+  memcpy(client->appleSessionKey, key, 16);
+  client->appleSessionKeyLen = 16;
+  client->appleSessionKeyReady = TRUE;
+  client->appleAuthType = rfbAppleAuthKerberos;
+  rfbClientLog("apple auth35: exported 16-byte session key from %s\n", source);
+  return TRUE;
+}
+
+static rfbBool auth35_export_lucid_key(rfbClient *client, gss_ctx_id_t *ctx)
+{
+  OM_uint32 major = 0;
+  OM_uint32 minor = 0;
+  void *raw = NULL;
+  gss_krb5_lucid_context_v1_t *lucid = NULL;
+  rfbBool ok = FALSE;
+
+  if (!client || !ctx || !*ctx) return FALSE;
+  major = gss_krb5_export_lucid_sec_context(&minor, ctx, 1, &raw);
+  if (major != GSS_S_COMPLETE || !raw) {
+    auth35_log_gss_error("apple auth35: gss_krb5_export_lucid_sec_context failed: ", major, minor);
+    return FALSE;
+  }
+
+  lucid = (gss_krb5_lucid_context_v1_t *)raw;
+  if (lucid->version == 1) {
+    if (lucid->protocol == 1 && lucid->cfx_kd.have_acceptor_subkey &&
+        lucid->cfx_kd.acceptor_subkey.length >= 16 && lucid->cfx_kd.acceptor_subkey.data) {
+      ok = auth35_set_session_key(client, (const uint8_t *)lucid->cfx_kd.acceptor_subkey.data,
+                                  lucid->cfx_kd.acceptor_subkey.length, "acceptor_subkey");
+    } else if (lucid->protocol == 1 && lucid->cfx_kd.ctx_key.length >= 16 &&
+               lucid->cfx_kd.ctx_key.data) {
+      ok = auth35_set_session_key(client, (const uint8_t *)lucid->cfx_kd.ctx_key.data,
+                                  lucid->cfx_kd.ctx_key.length, "ctx_key");
+    } else if (lucid->protocol == 0 && lucid->rfc1964_kd.ctx_key.length >= 16 &&
+               lucid->rfc1964_kd.ctx_key.data) {
+      ok = auth35_set_session_key(client, (const uint8_t *)lucid->rfc1964_kd.ctx_key.data,
+                                  lucid->rfc1964_kd.ctx_key.length, "rfc1964_ctx_key");
+    }
+  }
+
+  gss_krb5_free_lucid_sec_context(&minor, raw);
+  return ok;
+}
+
+static rfbBool HandleAppleAuth35(rfbClient *client)
+{
+  static const uint8_t preface[4] = {0x00, 0x00, 0x00, 0x00};
+  uint8_t zero_word[4];
+  uint8_t *aprep = NULL;
+  uint8_t *wrap = NULL;
+  uint32_t aprep_len = 0;
+  uint32_t wrap_len = 0;
+  rfbCredential *cred = NULL;
+  gss_name_t user_name = GSS_C_NO_NAME;
+  gss_name_t target_name = GSS_C_NO_NAME;
+  gss_cred_id_t gss_cred = GSS_C_NO_CREDENTIAL;
+  gss_ctx_id_t gss_ctx = GSS_C_NO_CONTEXT;
+  gss_buffer_desc input = GSS_C_EMPTY_BUFFER;
+  gss_buffer_desc output = GSS_C_EMPTY_BUFFER;
+  OM_uint32 major = 0;
+  OM_uint32 minor = 0;
+  OM_uint32 ret_flags = 0;
+  int conf_state = 0;
+  CFStringRef password = NULL;
+  CFStringRef lkdc_host = NULL;
+  CFMutableDictionaryRef attrs = NULL;
+  CFErrorRef cferr = NULL;
+  char *client_principal = NULL;
+  char *service_principal = NULL;
+  rfbBool ok = FALSE;
+
+  if (!client->GetCredential) {
+    rfbClientErr("apple auth35: GetCredential callback is not set\n");
+    return FALSE;
+  }
+  cred = client->GetCredential(client, rfbCredentialTypeUser);
+  if (!cred || !cred->userCredential.username || !cred->userCredential.password ||
+      !client->serverHost || !*client->serverHost) {
+    rfbClientErr("apple auth35: reading credential or hostname failed\n");
+    goto done;
+  }
+
+  if (!WriteToRFBServer(client, (const char *)preface, sizeof(preface))) goto done;
+  if (!ReadFromRFBServer(client, (char *)zero_word, sizeof(zero_word))) goto done;
+  if (read_be_u32(zero_word) != 0)
+    rfbClientLog("apple auth35: server preface word was 0x%08x\n", read_be_u32(zero_word));
+
+  client_principal = auth35_build_client_principal(cred->userCredential.username);
+  service_principal = auth35_build_service_principal();
+  if (!client_principal || !service_principal) {
+    rfbClientErr("apple auth35: missing LKDC realm. Set VNC_APPLE_KRB_REALM or pass a fully-qualified "
+                 "Kerberos principal in VNC_USER.\n");
+    goto done;
+  }
+
+  if (!auth35_import_name(client_principal, GSS_KRB5_NT_PRINCIPAL_NAME, &user_name,
+                          "client principal"))
+    goto done;
+
+  password = CFStringCreateWithCString(kCFAllocatorDefault, cred->userCredential.password,
+                                       kCFStringEncodingUTF8);
+  lkdc_host = CFStringCreateWithCString(kCFAllocatorDefault, client->serverHost,
+                                        kCFStringEncodingUTF8);
+  attrs = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+                                    &kCFTypeDictionaryValueCallBacks);
+  if (!password || !lkdc_host || !attrs) goto done;
+  CFDictionarySetValue(attrs, kGSSICPassword, password);
+  CFDictionarySetValue(attrs, kGSSCredentialUsage, kGSS_C_INITIATE);
+  CFDictionarySetValue(attrs, kGSSICLKDCHostname, lkdc_host);
+
+  major = gss_aapl_initial_cred(user_name, gss_mech_krb5, attrs, &gss_cred, &cferr);
+  if (major != GSS_S_COMPLETE || gss_cred == GSS_C_NO_CREDENTIAL) {
+    auth35_log_cferror("apple auth35: gss_aapl_initial_cred failed: ", cferr);
+    auth35_log_gss_error("apple auth35: gss_aapl_initial_cred failed: ", major, 0);
+    goto done;
+  }
+
+  if (!auth35_import_name(service_principal, GSS_KRB5_NT_PRINCIPAL_NAME, &target_name,
+                          "service principal"))
+    goto done;
+
+  major = gss_init_sec_context(&minor, gss_cred, &gss_ctx, target_name, (gss_OID)gss_mech_krb5,
+                               GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG, 0,
+                               GSS_C_NO_CHANNEL_BINDINGS, GSS_C_NO_BUFFER, NULL, &output,
+                               &ret_flags, NULL);
+  if ((major != GSS_S_COMPLETE && major != GSS_S_CONTINUE_NEEDED) || output.length == 0) {
+    auth35_log_gss_error("apple auth35: initial gss_init_sec_context failed: ", major, minor);
+    goto done;
+  }
+  if (!auth35_send_length_prefixed_blob(client, (const uint8_t *)output.value, output.length,
+                                        "AP-REQ")) {
+    gss_release_buffer(&minor, &output);
+    goto done;
+  }
+  gss_release_buffer(&minor, &output);
+
+  if (!read_length_prefixed_blob(client, &aprep, &aprep_len, "auth35 AP-REP")) goto done;
+  input.value = aprep;
+  input.length = aprep_len;
+  major = gss_init_sec_context(&minor, gss_cred, &gss_ctx, target_name, (gss_OID)gss_mech_krb5,
+                               GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG, 0,
+                               GSS_C_NO_CHANNEL_BINDINGS, &input, NULL, &output, &ret_flags,
+                               NULL);
+  if (major != GSS_S_COMPLETE) {
+    auth35_log_gss_error("apple auth35: AP-REP processing failed: ", major, minor);
+    goto done;
+  }
+  if (output.length != 0) {
+    rfbClientErr("apple auth35: unexpected AP-REP output token length=%lu\n",
+                 (unsigned long)output.length);
+    gss_release_buffer(&minor, &output);
+    goto done;
+  }
+  gss_release_buffer(&minor, &output);
+
+  if (!read_length_prefixed_blob(client, &wrap, &wrap_len, "auth35 wrap token")) goto done;
+  input.value = wrap;
+  input.length = wrap_len;
+  major = gss_unwrap(&minor, gss_ctx, &input, &output, &conf_state, NULL);
+  if (major != GSS_S_COMPLETE) {
+    auth35_log_gss_error("apple auth35: gss_unwrap failed: ", major, minor);
+    goto done;
+  }
+  if (!conf_state) {
+    rfbClientErr("apple auth35: wrap token did not provide confidentiality\n");
+    gss_release_buffer(&minor, &output);
+    goto done;
+  }
+  if (output.length >= 16 &&
+      auth35_set_session_key(client, (const uint8_t *)output.value, output.length, "gss_unwrap")) {
+    gss_release_buffer(&minor, &output);
+    ok = TRUE;
+    goto done;
+  }
+  rfbClientLog("apple auth35: unwrap produced %lu bytes; trying lucid context export\n",
+               (unsigned long)output.length);
+  gss_release_buffer(&minor, &output);
+  if (auth35_export_lucid_key(client, &gss_ctx)) {
+    ok = TRUE;
+    goto done;
+  }
+
+done:
+  if (gss_ctx != GSS_C_NO_CONTEXT) gss_delete_sec_context(&minor, &gss_ctx, GSS_C_NO_BUFFER);
+  if (gss_cred != GSS_C_NO_CREDENTIAL) gss_release_cred(&minor, &gss_cred);
+  if (user_name != GSS_C_NO_NAME) gss_release_name(&minor, &user_name);
+  if (target_name != GSS_C_NO_NAME) gss_release_name(&minor, &target_name);
+  if (output.length != 0) gss_release_buffer(&minor, &output);
+  release_cfref(cferr);
+  release_cfref(attrs);
+  release_cfref(password);
+  release_cfref(lkdc_host);
+  FreeAppleUserCredential(cred);
+  free(client_principal);
+  free(service_principal);
+  free(aprep);
+  free(wrap);
+  if (!ok) rfbClientResetAppleAuth(client);
+  return ok;
+}
+#else
+static rfbBool HandleAppleAuth35(rfbClient *client)
+{
+  (void)client;
+  rfbClientErr("Apple auth type 35 requires macOS GSS/Kerberos support\n");
+  return FALSE;
+}
+#endif
+
 rfbBool rfbClientHandleAppleAuth(rfbClient* client, uint32_t authScheme)
 {
   if (!client) return FALSE;
@@ -743,11 +1353,9 @@ rfbBool rfbClientHandleAppleAuth(rfbClient* client, uint32_t authScheme)
   case rfbAppleAuthRSA_SRP:
     return HandleAppleAuth33(client);
   case rfbAppleAuthKerberos:
-    rfbClientErr("Apple auth type 35 (Kerberos GSS-API) is not implemented in libvncclient yet\n");
-    return FALSE;
+    return HandleAppleAuth35(client);
   case rfbAppleAuthDirectSrp:
-    rfbClientErr("Apple auth type 36 (direct SRP) is not implemented in libvncclient yet\n");
-    return FALSE;
+    return HandleAppleAuth36(client);
   default:
     return FALSE;
   }
