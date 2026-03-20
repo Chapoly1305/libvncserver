@@ -234,6 +234,19 @@ int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len,
     return gcry_err_code(error) == GPG_ERR_NO_ERROR;
 }
 
+int encrypt_rsa_pkcs1_spki_der(uint8_t *out, size_t *out_len,
+			       const uint8_t *der, size_t der_len,
+			       const void *in, size_t in_len)
+{
+    (void)out;
+    (void)out_len;
+    (void)der;
+    (void)der_len;
+    (void)in;
+    (void)in_len;
+    return 0;
+}
+
 int dh_generate_keypair(uint8_t *priv_out, uint8_t *pub_out, const uint8_t *gen, const size_t gen_len, const uint8_t *prime, const size_t keylen)
 {
     int result = 0;

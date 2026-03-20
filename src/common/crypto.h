@@ -39,6 +39,12 @@ int encrypt_aes128ecb(void *out, int *out_len, const unsigned char key[16], cons
 int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len, uint32_t rounds, uint8_t *out, size_t out_len);
 
 /*
+  Imports an RSA public key from SubjectPublicKeyInfo DER and encrypts 'in'
+  with PKCS#1 v1.5 padding, writing the ciphertext to 'out'.
+ */
+int encrypt_rsa_pkcs1_spki_der(uint8_t *out, size_t *out_len, const uint8_t *der, size_t der_len, const void *in, size_t in_len);
+
+/*
    Generates a Diffie-Hellman public-private keypair using the generator value 'gen' and prime modulo
    'prime', writing the result to 'pub_out' and 'priv_out', which must be 'keylen' in size.
  */

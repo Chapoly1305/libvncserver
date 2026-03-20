@@ -28,6 +28,8 @@
 #include <openssl/dh.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
 #if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
 #include <openssl/provider.h>
 #endif
@@ -208,6 +210,46 @@ int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len,
     return PKCS5_PBKDF2_HMAC((const char *)password, (int)password_len, salt,
 			     (int)salt_len, rounds ? (int)rounds : 1,
 			     EVP_sha512(), (int)out_len, out) == 1;
+}
+
+int encrypt_rsa_pkcs1_spki_der(uint8_t *out, size_t *out_len,
+			       const uint8_t *der, size_t der_len,
+			       const void *in, size_t in_len)
+{
+    int result = 0;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *ctx = NULL;
+    const unsigned char *derp = der;
+    size_t required_len = 0;
+
+    if (!out || !out_len || !der || !in)
+	goto out;
+
+    pkey = d2i_PUBKEY(NULL, &derp, (long)der_len);
+    if (!pkey || EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA)
+	goto out;
+
+    ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx)
+	goto out;
+    if (EVP_PKEY_encrypt_init(ctx) <= 0)
+	goto out;
+    if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0)
+	goto out;
+    if (EVP_PKEY_encrypt(ctx, NULL, &required_len, in, in_len) <= 0)
+	goto out;
+    if (required_len > *out_len)
+	goto out;
+    if (EVP_PKEY_encrypt(ctx, out, &required_len, in, in_len) <= 0)
+	goto out;
+
+    *out_len = required_len;
+    result = 1;
+
+ out:
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return result;
 }
 
 static void pad_leading_zeros(uint8_t *out, const size_t current_len, const size_t expected_len) {
