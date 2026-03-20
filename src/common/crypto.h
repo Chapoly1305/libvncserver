@@ -35,6 +35,9 @@ int decrypt_rfbdes(void *out, int *out_len, const unsigned char key[8], const vo
 /* Encrypts 'in' with the the 16-byte key in 'key' using AES-128-ECB and writes the result to 'out'. */
 int encrypt_aes128ecb(void *out, int *out_len, const unsigned char key[16], const void *in, const size_t in_len);
 
+/* Derives key material with PBKDF2-HMAC-SHA512. */
+int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len, uint32_t rounds, uint8_t *out, size_t out_len);
+
 /*
    Generates a Diffie-Hellman public-private keypair using the generator value 'gen' and prime modulo
    'prime', writing the result to 'pub_out' and 'priv_out', which must be 'keylen' in size.

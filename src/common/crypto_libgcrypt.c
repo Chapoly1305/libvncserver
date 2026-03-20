@@ -220,6 +220,20 @@ int encrypt_aes128ecb(void *out, int *out_len, const unsigned char key[16], cons
     return result;
 }
 
+int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len,
+		       const uint8_t *salt, size_t salt_len, uint32_t rounds,
+		       uint8_t *out, size_t out_len)
+{
+    gcry_error_t error;
+
+    if (!password || !salt || !out || out_len == 0)
+	return 0;
+
+    error = gcry_kdf_derive(password, password_len, GCRY_KDF_PBKDF2, GCRY_MD_SHA512,
+			    salt, salt_len, rounds ? rounds : 1, out_len, out);
+    return gcry_err_code(error) == GPG_ERR_NO_ERROR;
+}
+
 int dh_generate_keypair(uint8_t *priv_out, uint8_t *pub_out, const uint8_t *gen, const size_t gen_len, const uint8_t *prime, const size_t keylen)
 {
     int result = 0;

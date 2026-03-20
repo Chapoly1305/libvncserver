@@ -199,6 +199,17 @@ int encrypt_aes128ecb(void *out, int *out_len, const unsigned char key[16], cons
     return result;
 }
 
+int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len,
+		       const uint8_t *salt, size_t salt_len, uint32_t rounds,
+		       uint8_t *out, size_t out_len)
+{
+    if (!password || !salt || !out || out_len == 0)
+	return 0;
+    return PKCS5_PBKDF2_HMAC((const char *)password, (int)password_len, salt,
+			     (int)salt_len, rounds ? (int)rounds : 1,
+			     EVP_sha512(), (int)out_len, out) == 1;
+}
+
 static void pad_leading_zeros(uint8_t *out, const size_t current_len, const size_t expected_len) {
     if (current_len >= expected_len || expected_len < 1)
         return;

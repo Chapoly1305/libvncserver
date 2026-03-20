@@ -90,6 +90,18 @@ int encrypt_aes128ecb(void *out, int *out_len, const unsigned char key[16], cons
     return 0;
 }
 
+int pbkdf2_hmac_sha512(const uint8_t *password, size_t password_len, const uint8_t *salt, size_t salt_len, uint32_t rounds, uint8_t *out, size_t out_len)
+{
+    (void)password;
+    (void)password_len;
+    (void)salt;
+    (void)salt_len;
+    (void)rounds;
+    (void)out;
+    (void)out_len;
+    return 0;
+}
+
 int dh_generate_keypair(uint8_t *priv_out, uint8_t *pub_out, const uint8_t *gen, const size_t gen_len, const uint8_t *prime, const size_t keylen)
 {
     return 0;
