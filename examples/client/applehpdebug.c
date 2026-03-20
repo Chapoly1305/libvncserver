@@ -2814,11 +2814,23 @@ static void configure_auth_schemes(rfbClient *client) {
     free(tmp);
   }
 
-  /* Default: built-in Apple RSA/SRP first, then legacy ARD, then common fallback paths. */
+  /* Default preference order for ARD servers: strongest Apple auth first.
+   * Kerberos (35) requires either an explicit realm or a fully-qualified principal. */
   {
-    uint32_t auth_schemes[] = {
-      rfbAppleAuthRSA_SRP, rfbARD, rfbVeNCrypt, rfbTLS, rfbVncAuth, rfbNoAuth, 0
-    };
+    uint32_t auth_schemes[6];
+    int i = 0;
+    const char *realm = apple_hp_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM");
+    const char *principal = apple_hp_getenv_first("VNC_APPLE_KRB_CLIENT_PRINCIPAL",
+                                                  "LIBVNCCLIENT_APPLE_KRB_CLIENT_PRINCIPAL");
+    const char *user = getenv("VNC_USER");
+    int kerb_ready = 0;
+
+    if ((realm && *realm) || (principal && *principal) || (user && strchr(user, '@'))) kerb_ready = 1;
+    if (kerb_ready) auth_schemes[i++] = rfbAppleAuthKerberos;
+    auth_schemes[i++] = rfbAppleAuthDirectSrp;
+    auth_schemes[i++] = rfbAppleAuthRSA_SRP;
+    auth_schemes[i++] = rfbARD;
+    auth_schemes[i] = 0;
     SetClientAuthSchemes(client, auth_schemes, -1);
   }
 }

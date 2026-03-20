@@ -229,12 +229,17 @@ static int auth33_parse_challenge_fields(const uint8_t *buf, size_t n, uint32_t 
 
   if (!buf || !out) return 0;
   if (auth_type == rfbAppleAuthRSA_SRP) {
-    if (n < 10 || memcmp(buf + 2, "RSA1", 4) != 0) {
+    if (n >= 10 && memcmp(buf + 2, "RSA1", 4) == 0) {
+      off = 10;
+    } else if (n >= 6 && read_be_u32(buf) == 2 && read_be_u16(buf + 4) == n - 6) {
+      /* Compatibility: some ARD auth33 flows encode a type/len envelope first:
+       *   u32 type (=2), u16 inner_len, then legacy SRP fields at +10. */
+      off = 10;
+    } else {
       rfbClientErr("ard auth%u: RSA1 challenge header missing or short (len=%lu)\n", auth_type,
                    (unsigned long)n);
       return 0;
     }
-    off = 10;
   } else if (auth_type == rfbAppleAuthDirectSrp) {
     if (n < 4 || read_be_u32(buf) != n - 4) {
       rfbClientErr("ard auth%u: direct SRP challenge inner length mismatch (len=%lu, inner=%u)\n",
