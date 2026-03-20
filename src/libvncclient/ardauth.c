@@ -141,6 +141,12 @@ static rfbBool ReadLengthPrefixedBlob(rfbClient *client, uint8_t **outbuf,
 static rfbBool WriteLengthPrefixedBlob(rfbClient *client, const uint8_t *buf,
                                        size_t len, const char *what);
 
+#ifdef LIBVNCSERVER_HAVE_SASL
+#define ARD_CLIENT_HAS_SASL_STATE(client) ((client)->saslconn != NULL)
+#else
+#define ARD_CLIENT_HAS_SASL_STATE(client) FALSE
+#endif
+
 static rfbBool ConsumeRSASRPServerFinalIfPresent(rfbClient *client) {
     uint8_t hdr[4];
     uint32_t n = 0;
@@ -155,7 +161,7 @@ static rfbBool ConsumeRSASRPServerFinalIfPresent(rfbClient *client) {
     if (client->buffered >= sizeof(hdr)) {
         memcpy(hdr, client->bufoutptr, sizeof(hdr));
     } else {
-        if (client->buffered > 0 || client->tlsSession || client->saslconn)
+        if (client->buffered > 0 || client->tlsSession || ARD_CLIENT_HAS_SASL_STATE(client))
             return TRUE;
         r = recv(client->sock, (char *)hdr, sizeof(hdr), MSG_PEEK);
         if (r < (ssize_t)sizeof(hdr))
