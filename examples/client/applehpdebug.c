@@ -1865,9 +1865,6 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   display_h = apple_hp_display_height(client);
   if (!force &&
       !apple_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) {
-                      (unsigned)target_w, (unsigned)target_h,
-                      (unsigned)display_w, (unsigned)display_h,
-                      reason ? reason : "unspecified");
     g_live.last_runtime_w = target_w;
     g_live.last_runtime_h = target_h;
     return 1;
@@ -2382,7 +2379,6 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
         g_hp.visible_content_y = crop_top;
         g_hp.visible_content_w = crop_w;
         g_hp.visible_content_h = crop_h;
-                          crop_left, crop_top, crop_w, crop_h, region_w, region_h, fb_w, fb_h);
       } else if (g_live.crop_x != crop_left || g_live.crop_y != crop_top ||
                  g_live.crop_w != crop_w || g_live.crop_h != crop_h) {
         g_live.crop_x = crop_left;
@@ -2390,7 +2386,6 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
         g_live.crop_w = crop_w;
         g_live.crop_h = crop_h;
         refresh_live_view_layout(client);
-                          crop_left, crop_top, crop_w, crop_h);
       }
     }
   }
@@ -2516,7 +2511,6 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   client->format.blueMax = sdl->format->Bmask >> client->format.blueShift;
 
   if (width <= 0 || height <= 0) {
-                      width, height);
     return TRUE;
   }
 
@@ -2659,8 +2653,6 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
           int send_x = 0;
           int send_y = 0;
           apple_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
-          maybe_log_input("wheel up x=%d y=%d send=%d,%d", g_live.pointer_x, g_live.pointer_y,
-                          send_x, send_y);
           SendPointerEvent(client, send_x, send_y, rfbButton4Mask);
           SendPointerEvent(client, send_x, send_y, 0);
         }
@@ -2671,8 +2663,6 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
           int send_x = 0;
           int send_y = 0;
           apple_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
-          maybe_log_input("wheel down x=%d y=%d send=%d,%d", g_live.pointer_x, g_live.pointer_y,
-                          send_x, send_y);
           SendPointerEvent(client, send_x, send_y, rfbButton5Mask);
           SendPointerEvent(client, send_x, send_y, 0);
         }
@@ -2706,15 +2696,10 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         }
       }
       map_live_view_pointer(client, raw_x, raw_y, &g_live.pointer_x, &g_live.pointer_y);
-      maybe_log_input("pointer raw=%d,%d mapped=%d,%d buttons=0x%x type=%u",
-                      raw_x, raw_y, g_live.pointer_x, g_live.pointer_y,
-                      g_live.button_mask, (unsigned)e->type);
       {
         int send_x = 0;
         int send_y = 0;
         apple_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
-        maybe_log_input("pointer-send x=%d y=%d send=%d,%d buttons=0x%x",
-                        g_live.pointer_x, g_live.pointer_y, send_x, send_y, g_live.button_mask);
         SendPointerEvent(client, send_x, send_y, g_live.button_mask);
       }
       redraw_live_view(client);
@@ -2725,10 +2710,6 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
     case SDL_KEYDOWN: {
       rfbKeySym key = sdl_key_to_rfb(&e->key);
       note_live_view_input();
-      if (key) {
-        maybe_log_input("keysym=0x%lx down=%d", (unsigned long)key,
-                        e->type == SDL_KEYDOWN ? 1 : 0);
-      }
       if (key) SendKeyEvent(client, key, e->type == SDL_KEYDOWN ? TRUE : FALSE);
       if (e->key.keysym.sym == SDLK_RALT) g_live.right_alt_key_down = e->type == SDL_KEYDOWN;
       if (e->key.keysym.sym == SDLK_LALT) g_live.left_alt_key_down = e->type == SDL_KEYDOWN;
@@ -2738,7 +2719,6 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
       rfbKeySym sym = utf8_char_to_rfb(e->text.text);
       note_live_view_input();
       if (sym) {
-        maybe_log_input("text='%s' sym=0x%lx", e->text.text, (unsigned long)sym);
         SendKeyEvent(client, sym, TRUE);
         SendKeyEvent(client, sym, FALSE);
       }
