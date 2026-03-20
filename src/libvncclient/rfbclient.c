@@ -102,6 +102,28 @@ rfbClientLogProc rfbClientErr=rfbDefaultClientLog;
 
 rfbClientProtocolExtension* rfbClientExtensions = NULL;
 
+static rfbBool
+SupportsARDAuthScheme(uint8_t authScheme)
+{
+	switch (authScheme) {
+	case rfbARDAuthDH:
+		return TRUE;
+#if defined(__APPLE__)
+	case rfbARDAuthKerberosGSSAPI:
+		return TRUE;
+#if defined(__has_include)
+#if __has_include(<openssl/bn.h>)
+	case rfbARDAuthRSASRP:
+	case rfbARDAuthDirectSRP:
+		return TRUE;
+#endif
+#endif
+#endif
+	default:
+		return FALSE;
+	}
+}
+
 void rfbClientRegisterExtension(rfbClientProtocolExtension* e)
 {
 	e->next = rfbClientExtensions;
@@ -465,12 +487,14 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
 {
     uint8_t count=0;
     uint8_t loop=0;
-    uint8_t flag=0;
+    uint8_t selectedLoop=0;
     rfbBool extAuthHandler;
     uint8_t tAuth[256];
     char buf1[500],buf2[10];
     uint32_t authScheme;
     rfbClientProtocolExtension* e;
+    rfbBool selected=FALSE;
+    int selectedPriority=-1;
 
     if (!ReadFromRFBServer(client, (char *)&count, 1)) return FALSE;
 
@@ -500,7 +524,6 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
 			break;
 		}
 
-        if (flag) continue;
         extAuthHandler=FALSE;
         for (e = rfbClientExtensions; e; e = e->next) {
             if (!e->handleAuthentication) continue;
@@ -519,7 +542,8 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
 #ifdef LIBVNCSERVER_HAVE_SASL
             tAuth[loop]==rfbSASL ||
 #endif /* LIBVNCSERVER_HAVE_SASL */
-            ((tAuth[loop]==rfbARD || tAuth[loop]==rfbUltraMSLogonII) && client->GetCredential))
+            (((SupportsARDAuthScheme(tAuth[loop])) ||
+              tAuth[loop]==rfbUltraMSLogonII) && client->GetCredential))
         {
             if (!subAuth && client->clientAuthSchemes)
             {
@@ -528,22 +552,23 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
                 {
                     if (client->clientAuthSchemes[i]==(uint32_t)tAuth[loop])
                     {
-                        flag++;
-                        authScheme=tAuth[loop];
+                        if (!selected || selectedPriority < 0 || i < selectedPriority) {
+                            selected=TRUE;
+                            selectedPriority=i;
+                            selectedLoop=loop;
+                            authScheme=tAuth[loop];
+                        }
                         break;
                     }
                 }
             }
             else
             {
-                flag++;
-                authScheme=tAuth[loop];
-            }
-            if (flag)
-            {
-                rfbClientLog("Selecting security type %d (%d/%d in the list)\n", authScheme, loop, count);
-                /* send back a single byte indicating which security type to use */
-                if (!WriteToRFBServer(client, (char *)&tAuth[loop], 1)) return FALSE;
+                if (!selected) {
+                    selected=TRUE;
+                    selectedLoop=loop;
+                    authScheme=tAuth[loop];
+                }
             }
         }
     }
@@ -560,9 +585,15 @@ ReadSupportedSecurityType(rfbClient* client, uint32_t *result, rfbBool subAuth)
                buf1);
         return FALSE;
     }
+    rfbClientLog("Selecting security type %d (%d/%d in the list)\n", authScheme, selectedLoop, count);
+    if (authScheme != rfbARDAuthDirectSRP) {
+        uint8_t selectedType = (uint8_t)authScheme;
+        if (!WriteToRFBServer(client, (char *)&selectedType, 1)) return FALSE;
+    }
     *result = authScheme;
     return TRUE;
 }
+
 
 static rfbBool
 HandleVncAuth(rfbClient *client)
