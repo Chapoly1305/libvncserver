@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
     int init_argc = 2;
     char *init_argv[3] = {NULL, NULL, NULL};
 
-    if (argc < 3 || strcmp(argv[1], "-auth") != 0 ||
+    if (argc < 4 || strcmp(argv[1], "-auth") != 0 ||
         !ParseAuthType(argv[2], &auth_types[0])) {
         fprintf(stderr, "usage: %s -auth <security-type> <host[:port]>\n",
                 argv[0]);

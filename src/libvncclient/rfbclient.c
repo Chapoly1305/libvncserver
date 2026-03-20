@@ -131,12 +131,10 @@ SupportsARDAuthScheme(uint8_t authScheme)
 #if defined(__APPLE__)
 	case rfbARDAuthKerberosGSSAPI:
 		return TRUE;
-#if defined(__has_include)
-#if __has_include(<openssl/bn.h>)
+#if defined(LIBVNCSERVER_HAVE_LIBSSL)
 	case rfbARDAuthRSASRP:
 	case rfbARDAuthDirectSRP:
 		return TRUE;
-#endif
 #endif
 #endif
 	default:

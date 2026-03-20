@@ -10,7 +10,7 @@
 #include <GSS/GSS.h>
 #endif
 
-#if defined(__has_include)
+#if defined(__APPLE__) && defined(LIBVNCSERVER_HAVE_LIBSSL) && defined(__has_include)
 #if __has_include(<openssl/bn.h>)
 #include <openssl/bn.h>
 #define LIBVNCCLIENT_APPLE_HAS_OPENSSL_BN 1
@@ -148,11 +148,19 @@ static rfbBool ConsumeRSASRPServerFinalIfPresent(rfbClient *client) {
     int wm = WaitForMessage(client, 1500000);
     ssize_t r;
 
-    if (wm <= 0)
+    if (wm < 0)
+        return FALSE;
+    if (wm == 0)
         return TRUE;
-    r = recv(client->sock, (char *)hdr, sizeof(hdr), MSG_PEEK);
-    if (r < 4)
-        return TRUE;
+    if (client->buffered >= sizeof(hdr)) {
+        memcpy(hdr, client->bufoutptr, sizeof(hdr));
+    } else {
+        if (client->buffered > 0 || client->tlsSession || client->saslconn)
+            return TRUE;
+        r = recv(client->sock, (char *)hdr, sizeof(hdr), MSG_PEEK);
+        if (r < (ssize_t)sizeof(hdr))
+            return TRUE;
+    }
     n = ReadBEU32(hdr);
     if (n < 16 || n > 4096)
         return TRUE;
@@ -1059,15 +1067,9 @@ done:
     return ok;
 }
 
+#if defined(__APPLE__)
 static rfbBool ImportKerberosName(const char *value, gss_const_OID oid,
                                   gss_name_t *out_name, const char *what) {
-#if !defined(__APPLE__)
-    (void)value;
-    (void)oid;
-    (void)out_name;
-    (void)what;
-    return FALSE;
-#else
     OM_uint32 major = 0;
     OM_uint32 minor = 0;
     gss_buffer_desc buf = GSS_C_EMPTY_BUFFER;
@@ -1086,8 +1088,8 @@ static rfbBool ImportKerberosName(const char *value, gss_const_OID oid,
         return FALSE;
     }
     return TRUE;
-#endif
 }
+#endif
 
 static rfbBool WriteLengthPrefixedBlob(rfbClient *client, const uint8_t *buf,
                                        size_t len, const char *what) {

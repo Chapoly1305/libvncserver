@@ -407,11 +407,6 @@ typedef struct _rfbClient {
 	 * Set by function SetClientAuthSchemes() */
 	uint32_t *clientAuthSchemes;
 
-	/** Optional configuration for ARD Kerberos auth. */
-	char *ardAuthRealm;
-	char *ardAuthClientPrincipal;
-	char *ardAuthServicePrincipal;
-
 	/** When the server is a repeater, this specifies the final destination */
 	char *destHost;
 	int destPort;
@@ -506,10 +501,16 @@ typedef struct _rfbClient {
 	 */
         GotXCutTextUTF8Proc GotXCutTextUTF8;
 
-        /* flag to indicate wheter updateRect is managed by lib or user */
-        rfbBool isUpdateRectManagedByLib;
+	        /* flag to indicate wheter updateRect is managed by lib or user */
+	        rfbBool isUpdateRectManagedByLib;
 
-        GetX509CertFingerprintMismatchDecisionProc GetX509CertFingerprintMismatchDecision;
+	        GetX509CertFingerprintMismatchDecisionProc GetX509CertFingerprintMismatchDecision;
+
+	/** Optional configuration for ARD Kerberos auth.
+	 * Appended here to preserve offsets of pre-existing public struct fields. */
+	char *ardAuthRealm;
+	char *ardAuthClientPrincipal;
+	char *ardAuthServicePrincipal;
 } rfbClient;
 
 /* cursor.c */
