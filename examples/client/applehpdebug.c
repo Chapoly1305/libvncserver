@@ -46,11 +46,6 @@
 
 #define APPLEHP_INFO_LOG(...) rfbClientLog(__VA_ARGS__)
 #define APPLEHP_ERROR_LOG(...) rfbClientErr(__VA_ARGS__)
-#if APPLEHPDEBUG_DEBUG_BUILD
-#define APPLEHP_DEBUG_LOG(...) rfbClientLog(__VA_ARGS__)
-#else
-#define APPLEHP_DEBUG_LOG(...) ((void)0)
-#endif
 
 static volatile sig_atomic_t g_stop = 0;
 struct apple_hp_frame_stats {
@@ -113,8 +108,11 @@ struct apple_hp_session_state {
   uint16_t layout_scaled_h;
   uint16_t pending_refresh_w;
   uint16_t pending_refresh_h;
+  uint16_t pending_dynamic_target_w;
+  uint16_t pending_dynamic_target_h;
   uint16_t last_dynamic_request_w;
   uint16_t last_dynamic_request_h;
+  long long dynamic_request_started_ms;
   int dynamic_request_in_flight;
   int dynamic_refresh_queued_for_request;
   struct apple_hp_transport_state transport;
@@ -160,6 +158,7 @@ struct apple_hp_live_view_state {
   SDL_Renderer *renderer;
   SDL_Window *window;
   int synthetic_resize_events;
+  int window_user_sized;
   int pending_dynamic_resize;
   int runtime_size_valid;
   uint16_t cached_runtime_w;
@@ -189,6 +188,7 @@ struct apple_hp_live_view_state {
   int crop_y;
   int crop_w;
   int crop_h;
+  int skip_next_fb_update;
 };
 
 static struct apple_hp_live_view_state g_live = {.needs_clear = 1};
@@ -213,6 +213,7 @@ static uint16_t apple_hp_request_width(rfbClient *client);
 static uint16_t apple_hp_request_height(rfbClient *client);
 static int apple_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
                                              const char *reason);
+static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force);
 #endif
 
 static int apple_hp_should_suppress_incremental(void) {
@@ -451,8 +452,6 @@ static void apple_hp_seed_known_auth35_realm(const char *host) {
   for (i = 0; i < sizeof(kKnown) / sizeof(kKnown[0]); ++i) {
     if (strcmp(normalized, kKnown[i].host) == 0) {
       setenv("VNC_APPLE_KRB_REALM", kKnown[i].realm, 0);
-      rfbClientLog("apple auth35: seeded VNC_APPLE_KRB_REALM=%s for host %s\n",
-                   kKnown[i].realm, normalized);
       return;
     }
   }
@@ -508,16 +507,6 @@ static int apple_hp_scale_coord_round(int pos, int src_extent, int dst_extent) {
   if (pos >= dst_max) return src_max;
   num = (long long)pos * (long long)src_max + (long long)(dst_max / 2);
   return (int)(num / (long long)dst_max);
-}
-
-static void maybe_log_input(const char *fmt, ...) {
-  va_list ap;
-  if (!g_runtime.log_input) return;
-  va_start(ap, fmt);
-  fprintf(stderr, "input: ");
-  vfprintf(stderr, fmt, ap);
-  fprintf(stderr, "\n");
-  va_end(ap);
 }
 
 static int hex_nibble(char c) {
@@ -673,6 +662,62 @@ static int parse_u32_env(const char *name, uint32_t *out) {
   if (!end || *end != '\0') return -1;
   *out = (uint32_t)v;
   return 1;
+}
+
+static uint32_t apple_hp_dynamic_round_step(void) {
+  uint32_t v = 0;
+  if (parse_u32_env("VNC_APPLE_HP_DYNAMIC_ROUND_STEP", &v) > 0 && v > 0 && v <= 0xffff)
+    return v;
+  return 16;
+}
+
+static uint32_t apple_hp_dynamic_min_delta(void) {
+  uint32_t v = 0;
+  if (parse_u32_env("VNC_APPLE_HP_DYNAMIC_MIN_DELTA", &v) > 0 && v > 0 && v <= 0xffff)
+    return v;
+  return 32;
+}
+
+static uint32_t apple_hp_dynamic_timeout_ms(void) {
+  uint32_t v = 0;
+  if (parse_u32_env("VNC_APPLE_HP_DYNAMIC_TIMEOUT_MS", &v) > 0 && v > 0) return v;
+  return 1500;
+}
+
+static uint32_t apple_hp_visible_content_pad(void) {
+  uint32_t v = 0;
+  if (parse_u32_env("VNC_APPLE_HP_VISIBLE_PAD", &v) > 0 && v <= 256) return v;
+  return 8;
+}
+
+static int apple_hp_visible_crop_enabled(void) {
+  /* Dynamic-resolution backing surfaces can carry trailing black padding
+   * after the server downsizes the virtual display. Crop detection is
+   * therefore on by default for the HP live-view path, with an env opt-out. */
+  return env_flag_default_true("VNC_APPLE_HP_VISIBLE_CROP");
+}
+
+static uint16_t apple_hp_round_dimension(uint16_t value, uint32_t step) {
+  uint32_t rounded = 0;
+
+  if (value == 0) return 0;
+  if (step <= 1) return value;
+  rounded = (((uint32_t)value + (step / 2u)) / step) * step;
+  if (rounded == 0) rounded = step;
+  if (rounded > 0xffffu) rounded = 0xffffu;
+  return (uint16_t)rounded;
+}
+
+static int apple_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
+                                                   uint16_t b_w, uint16_t b_h) {
+  uint32_t min_delta = apple_hp_dynamic_min_delta();
+  uint32_t diff_w;
+  uint32_t diff_h;
+
+  if (a_w == 0 || a_h == 0 || b_w == 0 || b_h == 0) return 1;
+  diff_w = (a_w > b_w) ? (uint32_t)(a_w - b_w) : (uint32_t)(b_w - a_w);
+  diff_h = (a_h > b_h) ? (uint32_t)(a_h - b_h) : (uint32_t)(b_h - a_h);
+  return diff_w >= min_delta || diff_h >= min_delta;
 }
 
 static uint16_t apple_hp_content_width(rfbClient *client) {
@@ -1404,6 +1449,7 @@ static void destroy_live_view(void) {
     SDL_DestroyWindow(g_live.window);
     g_live.window = NULL;
   }
+  g_live.window_user_sized = 0;
   SDL_ShowCursor(SDL_ENABLE);
   (void)sdl;
 }
@@ -1412,6 +1458,7 @@ static void live_view_target_size(rfbClient *client, int *out_w, int *out_h);
 static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_view_geometry *geom);
 static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
 static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force);
+static int apple_hp_dynamic_resize_ready(rfbClient *client);
 
 static void reset_live_view_crop(void) {
 #if defined(APPLEHPDEBUG_HAS_SDL)
@@ -1619,8 +1666,6 @@ static int apple_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int
   entry->height = height;
   g_live.cursor_current_cache_id = cache_id;
   g_live.cursor_visible = 1;
-  APPLEHP_DEBUG_LOG("live-view: stored cursor cache=%u hot=%d,%d size=%dx%d\n",
-                    cache_id, hot_x, hot_y, width, height);
   free(packed);
   return 1;
 #else
@@ -1653,21 +1698,16 @@ static void refresh_live_view_layout(rfbClient *client) {
   SDL_GetWindowSize(g_live.window, &current_w, &current_h);
   if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == 0 &&
       (window_flags & SDL_WINDOW_FULLSCREEN) == 0 &&
+      !g_live.window_user_sized &&
       (current_w != view_width || current_h != view_height)) {
     g_live.synthetic_resize_events += 2;
     SDL_SetWindowSize(g_live.window, view_width, view_height);
+    invalidate_live_view_runtime_size();
   }
   SDL_RenderSetLogicalSize(g_live.renderer, 0, 0);
   g_live.needs_clear = 1;
   memset(&geom, 0, sizeof(geom));
   compute_live_view_geometry(client, &geom);
-  APPLEHP_DEBUG_LOG("live-view: updated layout to view=%dx%d window=%dx%d output=%dx%d src=%d,%d %dx%d dst=%d,%d %dx%d content=%ux%u scaled=%ux%u\n",
-                    view_width, view_height, geom.window_w, geom.window_h,
-                    geom.output_w, geom.output_h,
-                    geom.src.x, geom.src.y, geom.src.w, geom.src.h,
-                    geom.dst.x, geom.dst.y, geom.dst.w, geom.dst.h,
-                    (unsigned)apple_hp_content_width(client), (unsigned)apple_hp_content_height(client),
-                    (unsigned)apple_hp_display_width(client), (unsigned)apple_hp_display_height(client));
 #else
   (void)client;
 #endif
@@ -1681,8 +1721,6 @@ static void invalidate_live_view_runtime_size(void) {
 
 static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h) {
 #if defined(APPLEHPDEBUG_HAS_SDL)
-  int output_w = 0;
-  int output_h = 0;
   int window_w = 0;
   int window_h = 0;
   int display_index = 0;
@@ -1707,21 +1745,21 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   }
   if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 ||
       (window_flags & SDL_WINDOW_FULLSCREEN) != 0) {
-    if (SDL_GetDisplayUsableBounds(display_index, &bounds) == 0 &&
+    /* Dynamic-resolution requests should follow the logical window/display
+     * size in points, not the HiDPI drawable size in pixels. Using drawable
+     * pixels here makes the remote desktop too dense, which shrinks icons/text.
+     * For fullscreen, prefer full display bounds instead of usable bounds so
+     * we do not under-request height and create local letterboxing. */
+    if (SDL_GetDisplayBounds(display_index, &bounds) == 0 &&
         bounds.w > 0 && bounds.h > 0) {
-      w = bounds.w;
-      h = bounds.h;
-    } else if (SDL_GetDisplayBounds(display_index, &bounds) == 0 &&
-               bounds.w > 0 && bounds.h > 0) {
       w = bounds.w;
       h = bounds.h;
     }
   }
-  if (g_live.renderer) SDL_GetRendererOutputSize(g_live.renderer, &output_w, &output_h);
   if (g_live.window) SDL_GetWindowSize(g_live.window, &window_w, &window_h);
   if (w <= 0 || h <= 0) {
-    w = output_w > 0 ? output_w : window_w;
-    h = output_h > 0 ? output_h : window_h;
+    w = window_w;
+    h = window_h;
   }
   if (w <= 0 || h <= 0) {
     live_view_target_size(client, &w, &h);
@@ -1743,42 +1781,116 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
 #endif
 }
 
+static int apple_hp_compute_dynamic_resolution_target(rfbClient *client,
+                                                      uint16_t *out_w,
+                                                      uint16_t *out_h) {
+  uint16_t target_w = 0;
+  uint16_t target_h = 0;
+  uint32_t round_step = 0;
+
+  if (!client || !out_w || !out_h) return 0;
+  if (!live_view_runtime_display_size(client, &target_w, &target_h)) return 0;
+  if (target_w == 0 || target_h == 0) return 0;
+  round_step = apple_hp_dynamic_round_step();
+  target_w = apple_hp_round_dimension(target_w, round_step);
+  target_h = apple_hp_round_dimension(target_h, round_step);
+  if (target_w == 0 || target_h == 0) return 0;
+  *out_w = target_w;
+  *out_h = target_h;
+  return 1;
+}
+
+static int apple_hp_dynamic_resize_ready(rfbClient *client) {
+  if (!client || !g_runtime.live_view || !g_runtime.apple_hp_mode) return 0;
+  if (!g_hp.rekey_seen || !g_hp.transport.active) return 0;
+  if (!g_hp.post_rekey_sent || g_hp.post_rekey_ready != 0) return 0;
+  if (!g_hp.displayinfo2_seen) return 0;
+  if (!g_hp.initial_full_refresh_done) return 0;
+  return 1;
+}
+
+static void apple_hp_clear_pending_dynamic_target(void) {
+  g_hp.pending_dynamic_target_w = 0;
+  g_hp.pending_dynamic_target_h = 0;
+}
+
+static void apple_hp_set_pending_dynamic_target(uint16_t target_w, uint16_t target_h,
+                                                const char *reason) {
+  g_hp.pending_dynamic_target_w = target_w;
+  g_hp.pending_dynamic_target_h = target_h;
+  rfbClientLog("apple-hp: queued dynamic target %ux%u while request in flight (%s)\n",
+               (unsigned)target_w, (unsigned)target_h, reason ? reason : "unspecified");
+}
+
+static void apple_hp_clear_dynamic_request_state(int clear_last_request) {
+  g_hp.dynamic_request_in_flight = 0;
+  g_hp.dynamic_refresh_queued_for_request = 0;
+  g_hp.dynamic_request_started_ms = 0;
+  if (clear_last_request) {
+    g_hp.last_dynamic_request_w = 0;
+    g_hp.last_dynamic_request_h = 0;
+  }
+}
+
 static int maybe_observe_dynamic_resolution_target(rfbClient *client, const char *reason) {
   uint16_t target_w = 0;
   uint16_t target_h = 0;
-  int can_send = 0;
 
-  (void)reason;
   if (!client || !g_runtime.live_view || !g_runtime.apple_hp_mode) return 1;
   if (apple_hp_display_width(client) == 0 || apple_hp_display_height(client) == 0) return 1;
-  if (!live_view_runtime_display_size(client, &target_w, &target_h)) return 1;
+  if (!apple_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
   if (target_w == 0 || target_h == 0) return 1;
-  can_send = g_hp.rekey_seen && g_hp.transport.active;
   if (target_w == g_live.last_runtime_w &&
       target_h == g_live.last_runtime_h) {
     return 1;
   }
-  if (!can_send) return 1;
+  if (!apple_hp_dynamic_resize_ready(client)) return 1;
+  rfbClientLog("apple-hp: observed viewport intent %ux%u (%s)\n",
+               (unsigned)target_w, (unsigned)target_h, reason ? reason : "unspecified");
   return maybe_send_dynamic_resolution_update(client, reason, FALSE);
 }
 
 static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force) {
   uint16_t target_w = 0;
   uint16_t target_h = 0;
+  uint16_t display_w = 0;
+  uint16_t display_h = 0;
 
   if (!client || !g_runtime.live_view || !g_runtime.apple_hp_mode) return 1;
+  if (!force && !apple_hp_dynamic_resize_ready(client)) return 1;
   if (!g_hp.rekey_seen || !g_hp.transport.active) return 1;
-  if (!live_view_runtime_display_size(client, &target_w, &target_h)) return 1;
+  if (!apple_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
   if (target_w == 0 || target_h == 0) return 1;
-  if (dynamic_resolution_target_matches_display(client, target_w, target_h)) {
+  display_w = apple_hp_display_width(client);
+  display_h = apple_hp_display_height(client);
+  if (!force &&
+      !apple_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) {
+                      (unsigned)target_w, (unsigned)target_h,
+                      (unsigned)display_w, (unsigned)display_h,
+                      reason ? reason : "unspecified");
     g_live.last_runtime_w = target_w;
     g_live.last_runtime_h = target_h;
     return 1;
   }
-  if (!force &&
-      g_hp.dynamic_request_in_flight &&
-      target_w == g_hp.last_dynamic_request_w &&
-      target_h == g_hp.last_dynamic_request_h) {
+  if (dynamic_resolution_target_matches_display(client, target_w, target_h)) {
+    g_live.last_runtime_w = target_w;
+    g_live.last_runtime_h = target_h;
+    apple_hp_clear_pending_dynamic_target();
+    return 1;
+  }
+  if (g_hp.dynamic_request_in_flight) {
+    if (target_w == g_hp.last_dynamic_request_w &&
+        target_h == g_hp.last_dynamic_request_h) {
+      return 1;
+    }
+    if (!force &&
+        g_hp.pending_dynamic_target_w == target_w &&
+        g_hp.pending_dynamic_target_h == target_h) {
+      return 1;
+    }
+    apple_hp_set_pending_dynamic_target(target_w, target_h, reason);
+    g_live.last_runtime_w = target_w;
+    g_live.last_runtime_h = target_h;
     return 1;
   }
   if (!force &&
@@ -1787,8 +1899,35 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
     return 1;
   }
   if (!send_runtime_display_configuration_blob(client, target_w, target_h, reason)) return 0;
+  g_hp.dynamic_request_started_ms = monotonic_ms();
   g_live.last_runtime_w = target_w;
   g_live.last_runtime_h = target_h;
+  apple_hp_clear_pending_dynamic_target();
+  return 1;
+}
+
+static int apple_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
+  long long elapsed_ms = 0;
+
+  if (!client || !g_hp.dynamic_request_in_flight) return 1;
+  if (g_hp.dynamic_request_started_ms <= 0) return 1;
+  elapsed_ms = monotonic_ms() - g_hp.dynamic_request_started_ms;
+  if (elapsed_ms < 0 || (uint32_t)elapsed_ms < apple_hp_dynamic_timeout_ms()) return 1;
+
+  rfbClientLog("apple-hp: dynamic request %ux%u timed out after %lld ms\n",
+               (unsigned)g_hp.last_dynamic_request_w,
+               (unsigned)g_hp.last_dynamic_request_h,
+               elapsed_ms);
+  apple_hp_clear_dynamic_request_state(TRUE);
+  if (g_hp.pending_dynamic_target_w != 0 && g_hp.pending_dynamic_target_h != 0) {
+    uint16_t pending_w = g_hp.pending_dynamic_target_w;
+    uint16_t pending_h = g_hp.pending_dynamic_target_h;
+    apple_hp_clear_pending_dynamic_target();
+    g_live.last_runtime_w = pending_w;
+    g_live.last_runtime_h = pending_h;
+    return maybe_send_dynamic_resolution_update(client, "dynamic-timeout", TRUE);
+  }
+  g_live.pending_dynamic_resize = 1;
   return 1;
 }
 
@@ -1798,6 +1937,8 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
   int display_h = 0;
   int fit_w = 0;
   int fit_h = 0;
+  int fit_src_w = 0;
+  int fit_src_h = 0;
   if (!client || !geom || !g_live.renderer) return 0;
   memset(geom, 0, sizeof(*geom));
   if (g_live.window) SDL_GetWindowSize(g_live.window, &geom->window_w, &geom->window_h);
@@ -1807,10 +1948,21 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
   display_w = apple_hp_display_width(client);
   display_h = apple_hp_display_height(client);
   if (g_runtime.apple_hp_mode && apple_hp_backing_width(client) > 0 && apple_hp_backing_height(client) > 0) {
-    geom->src.x = 0;
-    geom->src.y = 0;
-    geom->src.w = apple_hp_backing_width(client);
-    geom->src.h = apple_hp_backing_height(client);
+    if (g_hp.visible_content_valid &&
+        g_hp.visible_content_w > 0 && g_hp.visible_content_h > 0 &&
+        g_hp.visible_content_x >= 0 && g_hp.visible_content_y >= 0 &&
+        g_hp.visible_content_x + g_hp.visible_content_w <= client->width &&
+        g_hp.visible_content_y + g_hp.visible_content_h <= client->height) {
+      geom->src.x = g_hp.visible_content_x;
+      geom->src.y = g_hp.visible_content_y;
+      geom->src.w = g_hp.visible_content_w;
+      geom->src.h = g_hp.visible_content_h;
+    } else {
+      geom->src.x = 0;
+      geom->src.y = 0;
+      geom->src.w = apple_hp_backing_width(client);
+      geom->src.h = apple_hp_backing_height(client);
+    }
   } else {
     geom->src.x = g_live.crop_x;
     geom->src.y = g_live.crop_y;
@@ -1827,8 +1979,17 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
     geom->src.h = client->height > 0 ? client->height : 1;
   }
   if (g_runtime.apple_hp_mode && geom->src.w > 0 && geom->src.h > 0) {
-    int fit_src_w = display_w > 0 ? display_w : geom->src.w;
-    int fit_src_h = display_h > 0 ? display_h : geom->src.h;
+    if (g_hp.visible_content_valid &&
+        geom->src.x == g_hp.visible_content_x &&
+        geom->src.y == g_hp.visible_content_y &&
+        geom->src.w == g_hp.visible_content_w &&
+        geom->src.h == g_hp.visible_content_h) {
+      fit_src_w = geom->src.w;
+      fit_src_h = geom->src.h;
+    } else {
+      fit_src_w = display_w > 0 ? display_w : geom->src.w;
+      fit_src_h = display_h > 0 ? display_h : geom->src.h;
+    }
     fit_w = geom->output_w;
     fit_h = (int)(((long long)fit_w * (long long)fit_src_h) / (long long)fit_src_w);
     if (fit_h > geom->output_h) {
@@ -1926,6 +2087,8 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
   SDL_Rect input_rect;
   int display_w = 0;
   int display_h = 0;
+  int backing_w = 0;
+  int backing_h = 0;
   int region_hit = 0;
   int used_simple_scale = 0;
 
@@ -1943,6 +2106,8 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
       geom.src.w > 0 && geom.src.h > 0 && geom.dst.w > 0 && geom.dst.h > 0) {
     display_w = apple_hp_display_width(client);
     display_h = apple_hp_display_height(client);
+    backing_w = apple_hp_backing_width(client);
+    backing_h = apple_hp_backing_height(client);
     memset(&control_rect, 0, sizeof(control_rect));
     memset(&input_rect, 0, sizeof(input_rect));
     rel_x = output_x - geom.dst.x;
@@ -1954,7 +2119,20 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
     g_live.pointer_draw_x = output_x;
     g_live.pointer_draw_y = output_y;
     used_simple_scale = 1;
-    if (g_runtime.apple_hp_mode && display_w > 0 && display_h > 0) {
+    if (g_runtime.apple_hp_mode &&
+        g_hp.visible_content_valid &&
+        geom.src.w > 0 && geom.src.h > 0) {
+      int backing_x = geom.src.x + apple_hp_scale_coord_round(rel_x, geom.src.w, geom.dst.w);
+      int backing_y = geom.src.y + apple_hp_scale_coord_round(rel_y, geom.src.h, geom.dst.h);
+      if (display_w > 0 && display_h > 0 && backing_w > 0 && backing_h > 0) {
+        display_x = apple_hp_scale_coord_round(backing_x, display_w, backing_w);
+        display_y = apple_hp_scale_coord_round(backing_y, display_h, backing_h);
+      } else {
+        display_x = backing_x;
+        display_y = backing_y;
+      }
+      region_hit = 1;
+    } else if (g_runtime.apple_hp_mode && display_w > 0 && display_h > 0) {
       display_x = apple_hp_scale_coord_round(rel_x, display_w, geom.dst.w);
       display_y = apple_hp_scale_coord_round(rel_y, display_h, geom.dst.h);
       region_hit = 1;
@@ -1988,22 +2166,6 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
 done:
   *out_x = mapped_x;
   *out_y = mapped_y;
-  if (g_runtime.log_input) {
-    fprintf(stderr,
-            "input-geom: raw=%d,%d output=%d,%d rel=%d,%d mapped=%d,%d display_target=%d,%d mode=display region_hit=%d simple=%d force_input_1080p=%d fb=%d,%d display=%d,%d src=%d,%d %dx%d control=%d,%d %dx%d dst=%d,%d %dx%d window=%d,%d output_size=%d,%d logical=%u,%u scaled=%u,%u\n",
-            in_x, in_y, output_x, output_y, rel_x, rel_y, mapped_x, mapped_y,
-            display_x, display_y,
-            region_hit, used_simple_scale,
-            apple_hp_input_rect_scale() != 1.0,
-            client->width, client->height,
-            display_w, display_h,
-            geom.src.x, geom.src.y, geom.src.w, geom.src.h,
-            control_rect.x, control_rect.y, control_rect.w, control_rect.h,
-            geom.dst.x, geom.dst.y, geom.dst.w, geom.dst.h,
-            window_w, window_h, output_w, output_h,
-            (unsigned)apple_hp_content_width(client), (unsigned)apple_hp_content_height(client),
-            (unsigned)apple_hp_display_width(client), (unsigned)apple_hp_display_height(client));
-  }
 #else
   (void)client;
   if (out_x) *out_x = in_x;
@@ -2110,12 +2272,22 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
 
   if (!g_runtime.live_view || !client || !client->frameBuffer) return;
   if (client->format.bitsPerPixel != 32) return;
+  if (g_runtime.apple_hp_mode && !apple_hp_visible_crop_enabled()) {
+    if (g_hp.visible_content_valid) {
+      g_hp.visible_content_valid = 0;
+      g_hp.visible_content_x = 0;
+      g_hp.visible_content_y = 0;
+      g_hp.visible_content_w = 0;
+      g_hp.visible_content_h = 0;
+    }
+    return;
+  }
 
   fb_w = client->width;
   fb_h = client->height;
-  if (g_runtime.apple_hp_mode && apple_hp_display_width(client) > 0 && apple_hp_display_height(client) > 0) {
-    region_w = apple_hp_display_width(client);
-    region_h = apple_hp_display_height(client);
+  if (g_runtime.apple_hp_mode && apple_hp_backing_width(client) > 0 && apple_hp_backing_height(client) > 0) {
+    region_w = apple_hp_backing_width(client);
+    region_h = apple_hp_backing_height(client);
     allow_apply = 0;
   } else {
     region_w = fb_w;
@@ -2182,26 +2354,43 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
   }
 
   if (left > 32 || top > 32 || right < region_w - 33 || bottom < region_h - 33) {
+    int pad = (int)apple_hp_visible_content_pad();
+    int crop_left = 0;
+    int crop_top = 0;
+    int crop_right = right;
+    int crop_bottom = bottom;
     int crop_w = right - left + 1;
     int crop_h = bottom - top + 1;
+    /* Apple HP padding has only shown up on the trailing edges so far.
+     * Cropping the leading left/top edge based on pixel darkness is unsafe:
+     * real content like the macOS lock screen can legitimately start very dark.
+     * Keep the origin pinned at 0,0 and only trim right/bottom padding. */
+    if (crop_right < crop_left) crop_right = crop_left;
+    if (crop_bottom < crop_top) crop_bottom = crop_top;
+    if (pad > 0) {
+      crop_right += pad;
+      crop_bottom += pad;
+      if (crop_right >= region_w) crop_right = region_w - 1;
+      if (crop_bottom >= region_h) crop_bottom = region_h - 1;
+    }
+    crop_w = crop_right - crop_left + 1;
+    crop_h = crop_bottom - crop_top + 1;
     if (crop_w > 0 && crop_h > 0) {
       if (g_runtime.apple_hp_mode && !allow_apply) {
         g_hp.visible_content_valid = 1;
-        g_hp.visible_content_x = left;
-        g_hp.visible_content_y = top;
+        g_hp.visible_content_x = crop_left;
+        g_hp.visible_content_y = crop_top;
         g_hp.visible_content_w = crop_w;
         g_hp.visible_content_h = crop_h;
-        APPLEHP_DEBUG_LOG("live-view: detected visible-content bounds within display-space x=%d y=%d w=%d h=%d (display=%dx%d fb=%dx%d)\n",
-                          left, top, crop_w, crop_h, region_w, region_h, fb_w, fb_h);
-      } else if (g_live.crop_x != left || g_live.crop_y != top ||
+                          crop_left, crop_top, crop_w, crop_h, region_w, region_h, fb_w, fb_h);
+      } else if (g_live.crop_x != crop_left || g_live.crop_y != crop_top ||
                  g_live.crop_w != crop_w || g_live.crop_h != crop_h) {
-        g_live.crop_x = left;
-        g_live.crop_y = top;
+        g_live.crop_x = crop_left;
+        g_live.crop_y = crop_top;
         g_live.crop_w = crop_w;
         g_live.crop_h = crop_h;
         refresh_live_view_layout(client);
-        APPLEHP_DEBUG_LOG("live-view: cropped active region to x=%d y=%d w=%d h=%d\n",
-                          left, top, crop_w, crop_h);
+                          crop_left, crop_top, crop_w, crop_h);
       }
     }
   }
@@ -2314,6 +2503,7 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   client->width = sdl->pitch / (depth / 8);
   client->height = sdl->h;
   client->frameBuffer = (uint8_t *)sdl->pixels;
+  memset(client->frameBuffer, 0, (size_t)sdl->pitch * (size_t)sdl->h);
   reset_live_view_crop();
   invalidate_live_view_runtime_size();
 
@@ -2326,7 +2516,6 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   client->format.blueMax = sdl->format->Bmask >> client->format.blueShift;
 
   if (width <= 0 || height <= 0) {
-    APPLEHP_DEBUG_LOG("live-view: deferring window creation until framebuffer size is known (%dx%d)\n",
                       width, height);
     return TRUE;
   }
@@ -2347,8 +2536,22 @@ static rfbBool alloc_live_fb(rfbClient *client) {
       rfbClientSetClientData(client, SDL_Init, NULL);
       return FALSE;
     }
+    g_live.window_user_sized = 0;
   } else {
-    SDL_SetWindowSize(g_live.window, view_width, view_height);
+    Uint32 window_flags = SDL_GetWindowFlags(g_live.window);
+    int current_w = 0;
+    int current_h = 0;
+    SDL_GetWindowSize(g_live.window, &current_w, &current_h);
+    if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == 0 &&
+        (window_flags & SDL_WINDOW_FULLSCREEN) == 0 &&
+        !g_live.window_user_sized &&
+        (current_w != view_width || current_h != view_height)) {
+      /* The initial non-HP framebuffer can be a transient ultra-wide size.
+       * Once AppleDisplayLayout arrives, keep the live-view window aligned
+       * with the new target aspect instead of preserving the stale shell. */
+      g_live.synthetic_resize_events += 2;
+      SDL_SetWindowSize(g_live.window, view_width, view_height);
+    }
     if (client->desktopName) SDL_SetWindowTitle(g_live.window, client->desktopName);
   }
 
@@ -2357,7 +2560,6 @@ static rfbBool alloc_live_fb(rfbClient *client) {
     if (g_runtime.live_view_vsync) renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
     g_live.renderer = SDL_CreateRenderer(g_live.window, -1, renderer_flags);
     if (!g_live.renderer && renderer_flags != SDL_RENDERER_ACCELERATED) {
-      APPLEHP_DEBUG_LOG("live-view: falling back to non-vsync renderer: %s\n", SDL_GetError());
       g_live.renderer = SDL_CreateRenderer(g_live.window, -1, SDL_RENDERER_ACCELERATED);
     }
     if (!g_live.renderer) {
@@ -2376,12 +2578,23 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   g_live.texture = SDL_CreateTexture(g_live.renderer,
                                     SDL_PIXELFORMAT_ARGB8888,
                                     SDL_TEXTUREACCESS_STREAMING,
-                                    width,
-                                    height);
+                                    client->width,
+                                    client->height);
   if (!g_live.texture) {
     rfbClientErr("live-view: SDL_CreateTexture failed: %s\n", SDL_GetError());
     return FALSE;
   }
+
+  /* Zero-initialize the texture to avoid artifacts from uninitialized GPU memory */
+  {
+    void *pixels;
+    int pitch;
+    if (SDL_LockTexture(g_live.texture, NULL, &pixels, &pitch) == 0) {
+      memset(pixels, 0, (size_t)pitch * (size_t)client->height);
+      SDL_UnlockTexture(g_live.texture);
+    }
+  }
+
   reset_live_view_pending_present();
   g_live.last_present_us = 0;
   g_live.needs_clear = 1;
@@ -2411,9 +2624,13 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_SHOWN:
           invalidate_live_view_runtime_size();
           refresh_live_view_layout(client);
+          redraw_live_view(client);
           if (g_live.synthetic_resize_events > 0) {
             g_live.synthetic_resize_events--;
           } else {
+            if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
+              g_live.window_user_sized = 1;
+            }
             g_live.pending_dynamic_resize = 1;
           }
           SendFramebufferUpdateRequest(client, 0, 0,
@@ -2544,6 +2761,15 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   if (w <= 0 || h <= 0) return;
   sdl = (SDL_Surface *)rfbClientGetClientData(client, SDL_Init);
   if (!sdl) return;
+
+  /* Strict bounds check to prevent texture update overflow/crash */
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x >= client->width || y >= client->height) return;
+  if (x + w > client->width) w = client->width - x;
+  if (y + h > client->height) h = client->height - y;
+  if (w <= 0 || h <= 0) return;
+
   r.x = x;
   r.y = y;
   r.w = w;
@@ -2592,6 +2818,7 @@ static const char *apple_hp_rect_encoding_name(int32_t encoding) {
 }
 
 static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateRectHeader *rect) {
+  g_live.skip_next_fb_update = 1;
   uint8_t buf[36];
   uint8_t hdr[2];
   uint8_t cursor_hdr[8];
@@ -2744,13 +2971,29 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
          g_hp.last_dynamic_request_w == 0 || g_hp.last_dynamic_request_h == 0)) {
       uint16_t request_w = apple_hp_request_width(client);
       uint16_t request_h = apple_hp_request_height(client);
+      uint16_t pending_target_w = g_hp.pending_dynamic_target_w;
+      uint16_t pending_target_h = g_hp.pending_dynamic_target_h;
       reset_live_view_crop();
       refresh_live_view_layout(client);
       if (g_hp.dynamic_request_in_flight &&
           scaled_w == g_hp.last_dynamic_request_w &&
           scaled_h == g_hp.last_dynamic_request_h) {
-        g_hp.dynamic_request_in_flight = 0;
-        if (!g_hp.dynamic_refresh_queued_for_request) {
+        rfbClientLog("apple-hp: confirmed dynamic target %ux%u from AppleDisplayLayout\n",
+                     (unsigned)scaled_w, (unsigned)scaled_h);
+        apple_hp_clear_dynamic_request_state(FALSE);
+        if (pending_target_w != 0 &&
+            pending_target_h != 0 &&
+            apple_hp_dynamic_target_materially_diff(pending_target_w, pending_target_h,
+                                                    scaled_w, scaled_h)) {
+          apple_hp_clear_pending_dynamic_target();
+          g_live.last_runtime_w = pending_target_w;
+          g_live.last_runtime_h = pending_target_h;
+          if (!maybe_send_dynamic_resolution_update(client, "layout-confirmed-pending", TRUE)) {
+            free(payload);
+            return FALSE;
+          }
+        } else if (!g_hp.dynamic_refresh_queued_for_request) {
+          apple_hp_clear_pending_dynamic_target();
           g_hp.pending_refresh_w = request_w;
           g_hp.pending_refresh_h = request_h;
           g_hp.initial_full_refresh_retries = 0;
@@ -2896,12 +3139,27 @@ static rfbBool malloc_fb(rfbClient *client) {
     rfbClientErr("malloc framebuffer failed (%zu bytes)\n", size);
     return FALSE;
   }
+  memset(client->frameBuffer, 0, size);
   rfbClientLog("framebuffer allocated: %dx%d bpp=%d (%zu bytes)\n",
                client->width, client->height, client->format.bitsPerPixel, size);
   return TRUE;
 }
 
 static void on_fb_update(rfbClient *client, int x, int y, int w, int h) {
+  if (g_live.skip_next_fb_update) {
+    g_live.skip_next_fb_update = 0;
+    return;
+  }
+  if (!client || w <= 0 || h <= 0) return;
+
+  /* Safety: clamp and validate coordinates against actual allocated dimensions */
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x >= client->width || y >= client->height) return;
+  if (x + w > client->width) w = client->width - x;
+  if (y + h > client->height) h = client->height - y;
+  if (w <= 0 || h <= 0) return;
+
   unsigned long long px = 0;
   unsigned long long bytes = 0;
   int bpp = client ? client->format.bitsPerPixel : 0;
@@ -2929,15 +3187,25 @@ static void on_fb_update(rfbClient *client, int x, int y, int w, int h) {
 
 static void on_fb_update_done(rfbClient *client) {
   long long now_ms = monotonic_ms();
+  uint16_t repaint_w = 0;
+  uint16_t repaint_h = 0;
   g_frame.frames++;
   if (g_frame.first_frame_ms == 0) g_frame.first_frame_ms = now_ms;
   g_frame.last_frame_ms = now_ms;
 
+  if (client && g_runtime.apple_hp_mode) {
+    repaint_w = apple_hp_backing_width(client);
+    repaint_h = apple_hp_backing_height(client);
+  } else if (client) {
+    repaint_w = apple_hp_content_width(client);
+    repaint_h = apple_hp_content_height(client);
+  }
+
   if (!g_hp.initial_full_refresh_done && g_hp.displayinfo2_seen && client &&
-      apple_hp_content_width(client) > 0 && apple_hp_content_height(client) > 0) {
+      repaint_w > 0 && repaint_h > 0) {
     unsigned long long screen_px =
-        (unsigned long long)apple_hp_content_width(client) *
-        (unsigned long long)apple_hp_content_height(client);
+        (unsigned long long)repaint_w *
+        (unsigned long long)repaint_h;
     if (g_frame.frame_pixels >= screen_px / 4ULL) {
       g_hp.initial_full_refresh_done = 1;
       g_hp.initial_full_refresh_retries = 0;
@@ -3094,16 +3362,6 @@ int main(int argc, char **argv) {
     client->appData.encodingsString = getenv("VNC_ENCODINGS");
   }
 
-  rfbClientLog("client opts live_view=%d live_view_vsync=%d low_latency_input=%d log_input=%d apple_hp=%d share_desktop=%d view_only=%d init_override=%s\n",
-               g_runtime.live_view,
-               g_runtime.live_view_vsync,
-               g_runtime.low_latency_input,
-               g_runtime.log_input,
-               g_runtime.apple_hp_mode,
-               client->appData.shareDesktop,
-               client->appData.viewOnly,
-               client->appData.hasClientInitFlags ? "0xC1" : "(none)");
-
   if (!rfbInitClient(client, &argc, argv)) {
     return 1;
   }
@@ -3132,9 +3390,11 @@ int main(int argc, char **argv) {
       while (SDL_PollEvent(&e)) {
         if (!handle_live_view_event(client, &e)) break;
       }
-      if (g_live.pending_dynamic_resize) {
-        if (!maybe_send_dynamic_resolution_update(client, "window-event", FALSE)) break;
-        g_live.pending_dynamic_resize = 0;
+    if (g_live.pending_dynamic_resize) {
+        if (apple_hp_dynamic_resize_ready(client)) {
+          if (!maybe_send_dynamic_resolution_update(client, "window-event", FALSE)) break;
+          g_live.pending_dynamic_resize = 0;
+        }
       }
     }
 #endif
@@ -3157,6 +3417,7 @@ int main(int argc, char **argv) {
       if (!apple_hp_send_post_rekey_setup(client)) break;
       g_hp.post_rekey_ready = 0;
     }
+    if (n == 0 && !apple_hp_maybe_handle_dynamic_request_timeout(client)) break;
     if (n == 0 && !apple_hp_maybe_request_pending_region_refresh(client)) break;
     if (n == 0 && !apple_hp_maybe_retry_initial_full_refresh(client)) break;
 #if defined(APPLEHPDEBUG_HAS_SDL)
