@@ -5,6 +5,7 @@
 #include "rfb/rfbconfig.h"
 
 #define SHA1_HASH_SIZE 20
+#define SHA512_HASH_SIZE 64
 #define MD5_HASH_SIZE 16
 
 /* Generates an MD5 hash of 'in' and writes it to 'out', which must be 16 bytes in size. */
@@ -12,6 +13,9 @@ int hash_md5(void *out, const void *in, const size_t in_len);
 
 /* Generates an SHA1 hash of 'in' and writes it to 'out', which must be 20 bytes in size. */
 int hash_sha1(void *out, const void *in, const size_t in_len);
+
+/* Generates an SHA512 hash of 'in' and writes it to 'out', which must be 64 bytes in size. */
+int hash_sha512(void *out, const void *in, const size_t in_len);
 
 /* Fill 'out' with 'len' random bytes. */
 void random_bytes(void *out, size_t len);

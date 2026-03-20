@@ -46,6 +46,14 @@ int hash_sha1(void *out, const void *in, const size_t in_len)
     return 1;
 }
 
+int hash_sha512(void *out, const void *in, const size_t in_len)
+{
+    (void)out;
+    (void)in;
+    (void)in_len;
+    return 0;
+}
+
 void random_bytes(void *out, size_t len)
 {
 

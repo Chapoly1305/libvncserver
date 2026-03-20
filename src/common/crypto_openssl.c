@@ -64,6 +64,28 @@ int hash_sha1(void *out, const void *in, const size_t in_len)
     return 1;
 }
 
+int hash_sha512(void *out, const void *in, const size_t in_len)
+{
+    EVP_MD_CTX *ctx = NULL;
+    int result = 0;
+    unsigned int digest_len = 0;
+
+    if (!(ctx = EVP_MD_CTX_new()))
+	goto out;
+    if (!EVP_DigestInit_ex(ctx, EVP_sha512(), NULL))
+	goto out;
+    if (!EVP_DigestUpdate(ctx, in, in_len))
+	goto out;
+    if (!EVP_DigestFinal_ex(ctx, out, &digest_len))
+	goto out;
+
+    result = digest_len == SHA512_HASH_SIZE;
+
+ out:
+    EVP_MD_CTX_free(ctx);
+    return result;
+}
+
 void random_bytes(void *out, size_t len)
 {
     RAND_bytes(out, len);
