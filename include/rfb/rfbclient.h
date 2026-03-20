@@ -407,6 +407,11 @@ typedef struct _rfbClient {
 	 * Set by function SetClientAuthSchemes() */
 	uint32_t *clientAuthSchemes;
 
+	/** Optional configuration for ARD Kerberos auth. */
+	char *ardAuthRealm;
+	char *ardAuthClientPrincipal;
+	char *ardAuthServicePrincipal;
+
 	/** When the server is a repeater, this specifies the final destination */
 	char *destHost;
 	int destPort;
@@ -529,6 +534,9 @@ extern rfbClientLogProc rfbClientLog,rfbClientErr;
 extern rfbBool ConnectToRFBServer(rfbClient* client,const char *hostname, int port);
 extern rfbBool ConnectToRFBRepeater(rfbClient* client,const char *repeaterHost, int repeaterPort, const char *destHost, int destPort);
 extern void SetClientAuthSchemes(rfbClient* client,const uint32_t *authSchemes, int size);
+extern rfbBool rfbClientSetARDAuthRealm(rfbClient *client, const char *realm);
+extern rfbBool rfbClientSetARDAuthClientPrincipal(rfbClient *client, const char *principal);
+extern rfbBool rfbClientSetARDAuthServicePrincipal(rfbClient *client, const char *principal);
 extern rfbBool InitialiseRFBConnection(rfbClient* client);
 /**
  * Sends format and encoding parameters to the server. Your application can

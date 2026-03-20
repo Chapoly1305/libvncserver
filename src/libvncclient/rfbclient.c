@@ -103,6 +103,25 @@ rfbClientLogProc rfbClientErr=rfbDefaultClientLog;
 rfbClientProtocolExtension* rfbClientExtensions = NULL;
 
 static rfbBool
+SetOptionalClientString(char **dst, const char *value)
+{
+	char *copy = NULL;
+
+	if (!dst)
+		return FALSE;
+
+	if (value) {
+		copy = strdup(value);
+		if (!copy)
+			return FALSE;
+	}
+
+	free(*dst);
+	*dst = copy;
+	return TRUE;
+}
+
+static rfbBool
 SupportsARDAuthScheme(uint8_t authScheme)
 {
 	switch (authScheme) {
@@ -985,6 +1004,30 @@ SetClientAuthSchemes(rfbClient* client,const uint32_t *authSchemes, int size)
       client->clientAuthSchemes[size] = 0;
     }
   }
+}
+
+rfbBool
+rfbClientSetARDAuthRealm(rfbClient *client, const char *realm)
+{
+  if (!client)
+    return FALSE;
+  return SetOptionalClientString(&client->ardAuthRealm, realm);
+}
+
+rfbBool
+rfbClientSetARDAuthClientPrincipal(rfbClient *client, const char *principal)
+{
+  if (!client)
+    return FALSE;
+  return SetOptionalClientString(&client->ardAuthClientPrincipal, principal);
+}
+
+rfbBool
+rfbClientSetARDAuthServicePrincipal(rfbClient *client, const char *principal)
+{
+  if (!client)
+    return FALSE;
+  return SetOptionalClientString(&client->ardAuthServicePrincipal, principal);
 }
 
 /*
