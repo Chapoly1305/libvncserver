@@ -152,7 +152,7 @@ static rfbBool ConsumeRSASRPServerFinalIfPresent(rfbClient *client) {
     uint32_t n = 0;
     uint8_t *buf = NULL;
     int wm = WaitForMessage(client, 1500000);
-    ssize_t r;
+    int r;
 
     if (wm < 0)
         return FALSE;
@@ -164,7 +164,7 @@ static rfbBool ConsumeRSASRPServerFinalIfPresent(rfbClient *client) {
         if (client->buffered > 0 || client->tlsSession || ARD_CLIENT_HAS_SASL_STATE(client))
             return TRUE;
         r = recv(client->sock, (char *)hdr, sizeof(hdr), MSG_PEEK);
-        if (r < (ssize_t)sizeof(hdr))
+        if (r < (int)sizeof(hdr))
             return TRUE;
     }
     n = ReadBEU32(hdr);
