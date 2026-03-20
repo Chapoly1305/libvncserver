@@ -248,7 +248,11 @@ if(SYSTEMD_FOUND)
 endif(SYSTEMD_FOUND)
 
 # common crypto used by both libvncserver and libvncclient
-if(WITH_GCRYPT AND LIBGCRYPT_LIBRARIES)
+if(APPLE AND OPENSSL_FOUND)
+  message(STATUS "Building crypto with OpenSSL")
+  set(CRYPTO_LIBRARIES ${OPENSSL_LIBRARIES})
+  set(CRYPTO_SOURCES ${COMMON_DIR}/crypto_openssl.c)
+elseif(WITH_GCRYPT AND LIBGCRYPT_LIBRARIES)
   message(STATUS "Building crypto with Libgcrypt")
   set(CRYPTO_LIBRARIES ${LIBGCRYPT_LIBRARIES})
   set(CRYPTO_SOURCES ${COMMON_DIR}/crypto_libgcrypt.c)
@@ -378,6 +382,7 @@ set(LIBVNCSERVER_SOURCES
 set(LIBVNCCLIENT_SOURCES
     ${LIBVNCCLIENT_DIR}/cursor.c
     ${LIBVNCCLIENT_DIR}/listen.c
+    ${LIBVNCCLIENT_DIR}/ardauth.c
     ${LIBVNCCLIENT_DIR}/rfbclient.c
     ${LIBVNCCLIENT_DIR}/sockets.c
     ${LIBVNCCLIENT_DIR}/vncviewer.c
@@ -516,6 +521,9 @@ if(WITH_LIBVNCCLIENT)
                         ${GNUTLS_LIBRARIES}
                         ${OPENSSL_LIBRARIES}
   )
+  if(APPLE)
+    target_link_libraries(vncclient "-framework CoreFoundation" "-framework GSS" "-framework Kerberos")
+  endif()
   set(LIBVNCSERVER_LIBRARIES vncclient)
 endif(WITH_LIBVNCCLIENT)
 if(WITH_LIBVNCSERVER)
