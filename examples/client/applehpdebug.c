@@ -112,6 +112,8 @@ struct apple_hp_session_state {
   uint16_t pending_dynamic_target_h;
   uint16_t last_dynamic_request_w;
   uint16_t last_dynamic_request_h;
+  uint16_t last_backing_w;
+  uint16_t last_backing_h;
   long long dynamic_request_started_ms;
   int dynamic_request_in_flight;
   int dynamic_refresh_queued_for_request;
@@ -807,8 +809,20 @@ static rfbBool apple_hp_resize_framebuffer_if_needed(rfbClient *client, uint16_t
     alloc_w = (uint16_t)(alloc_w + kAppleHPFramebufferSlack);
   if (alloc_h <= (uint16_t)(0xffff - kAppleHPFramebufferSlack))
     alloc_h = (uint16_t)(alloc_h + kAppleHPFramebufferSlack);
-  if (alloc_w <= (uint16_t)client->width && alloc_h <= (uint16_t)client->height) return TRUE;
+  if (alloc_w <= (uint16_t)client->width && alloc_h <= (uint16_t)client->height) {
+    if (width != g_hp.last_backing_w || height != g_hp.last_backing_h) {
+      /* Resolution changed. Even if we have enough space, we must re-allocate
+       * (or at least zero-initialize) to ensure no stale data from the previous
+       * resolution remains in the framebuffer or SDL texture. */
+      g_hp.last_backing_w = width;
+      g_hp.last_backing_h = height;
+      return client->MallocFrameBuffer(client);
+    }
+    return TRUE;
+  }
 
+  g_hp.last_backing_w = width;
+  g_hp.last_backing_h = height;
   client->width = alloc_w;
   client->height = alloc_h;
   client->screen.width = rfbClientSwap16IfLE(alloc_w);
