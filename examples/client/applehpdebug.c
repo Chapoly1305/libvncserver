@@ -606,6 +606,10 @@ static int env_flag_default_true(const char *name) {
   return env_flag_enabled(name);
 }
 
+static int env_flag_default_false(const char *name) {
+  return env_flag_enabled(name);
+}
+
 static const char *apple_hp_getenv_first(const char *a, const char *b) {
   const char *s = NULL;
   if (a) {
@@ -907,10 +911,11 @@ static uint32_t apple_hp_visible_content_pad(void) {
 }
 
 static int apple_hp_visible_crop_enabled(void) {
-  /* Dynamic-resolution backing surfaces can carry trailing black padding
-   * after the server downsizes the virtual display. Crop detection is
-   * therefore on by default for the HP live-view path, with an env opt-out. */
-  return env_flag_default_true("VNC_APPLE_HP_VISIBLE_CROP");
+  /* HP backing/layout sizes are authoritative for rendering. Heuristic crop
+   * detection can misclassify legitimate dark regions during startup and after
+   * layout changes, which distorts the live-view aspect. Keep cropping opt-in
+   * for debugging and edge cases instead of enabling it by default. */
+  return env_flag_default_false("VNC_APPLE_HP_VISIBLE_CROP");
 }
 
 static int apple_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
@@ -1210,8 +1215,37 @@ static int send_set_display_message(rfbClient *client) {
   return send_blob(client, &msg, sizeof(msg), "apple-hp post-rekey hello");
 }
 
+static double apple_hp_runtime_scale_factor(void) {
+#if defined(APPLEHPDEBUG_HAS_SDL)
+  int window_w = 0;
+  int window_h = 0;
+  int output_w = 0;
+  int output_h = 0;
+  double scale_x;
+  double scale_y;
+  double scale;
+
+  if (!g_runtime.live_view || !g_live.window || !g_live.renderer) return 1.0;
+  SDL_GetWindowSize(g_live.window, &window_w, &window_h);
+  if (window_w <= 0 || window_h <= 0) return 1.0;
+  if (SDL_GetRendererOutputSize(g_live.renderer, &output_w, &output_h) < 0) return 1.0;
+  if (output_w <= 0 || output_h <= 0) return 1.0;
+  scale_x = (double)output_w / (double)window_w;
+  scale_y = (double)output_h / (double)window_h;
+  scale = ((scale_x > scale_y) ? scale_x : scale_y) * 0.5;
+  if (scale > 0.95 && scale < 1.05) scale = 1.0;
+  if (scale < 0.5) scale = 0.5;
+  if (scale > 2.0) scale = 2.0;
+  return scale;
+#else
+  return 1.0;
+#endif
+}
+
 static int send_native_scale_factor_message(rfbClient *client) {
-  struct apple_hp_scale_factor_message msg = apple_hp_make_native_scale_factor_message();
+  double scale = apple_hp_runtime_scale_factor();
+  struct apple_hp_scale_factor_message msg = apple_hp_make_scale_factor_message(scale);
+  rfbClientLog("apple-hp: using scale factor %.6f\n", scale);
   return send_blob(client, &msg, sizeof(msg), "apple-hp scale factor");
 }
 
@@ -1964,6 +1998,8 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
 #if defined(APPLEHPDEBUG_HAS_SDL)
   int window_w = 0;
   int window_h = 0;
+  int output_w = 0;
+  int output_h = 0;
   int display_index = 0;
   int w = 0;
   int h = 0;
@@ -1971,13 +2007,6 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   SDL_Rect bounds;
 
   if (!client || !out_w || !out_h) return 0;
-  if (g_live.runtime_size_valid &&
-      g_live.cached_runtime_w > 0 &&
-      g_live.cached_runtime_h > 0) {
-    *out_w = g_live.cached_runtime_w;
-    *out_h = g_live.cached_runtime_h;
-    return 1;
-  }
   memset(&bounds, 0, sizeof(bounds));
   if (g_live.window) {
     window_flags = SDL_GetWindowFlags(g_live.window);
@@ -1985,13 +2014,36 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
     if (display_index < 0) display_index = 0;
     SDL_GetWindowSize(g_live.window, &window_w, &window_h);
   }
+  if (g_live.renderer) {
+    if (SDL_GetRendererOutputSize(g_live.renderer, &output_w, &output_h) < 0) {
+      output_w = 0;
+      output_h = 0;
+    }
+  }
+  if (output_w > 0 && output_h > 0) {
+    int hidpi_scale = 1;
+    if (window_w > 0) {
+      int inferred = (output_w + (window_w / 2)) / window_w;
+      if (inferred > hidpi_scale) hidpi_scale = inferred;
+    }
+    if (window_h > 0) {
+      int inferred = (output_h + (window_h / 2)) / window_h;
+      if (inferred > hidpi_scale) hidpi_scale = inferred;
+    }
+    if (hidpi_scale < 1) hidpi_scale = 1;
+    w = output_w / hidpi_scale;
+    h = output_h / hidpi_scale;
+  }
   if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 ||
       (window_flags & SDL_WINDOW_FULLSCREEN) != 0) {
     /* Dynamic-resolution requests should follow the logical fullscreen window
      * size in points, not the HiDPI drawable size in pixels. On macOS the
      * actual fullscreen window size tracks the drawable area more reliably
      * than display bounds, which can include extra space and produce bars. */
-    if (window_w > 0 && window_h > 0) {
+    if (w > 0 && h > 0) {
+      /* Prefer normalized drawable size when available; it reflects the
+       * actual fullscreen content area more accurately than window chrome. */
+    } else if (window_w > 0 && window_h > 0) {
       w = window_w;
       h = window_h;
     } else if (SDL_GetDisplayUsableBounds(display_index, &bounds) == 0 &&
@@ -2235,17 +2287,13 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
     geom->src.h = client->height > 0 ? client->height : 1;
   }
   if (g_runtime.apple_hp_mode && geom->src.w > 0 && geom->src.h > 0) {
-    if (g_hp.visible_content_valid &&
-        geom->src.x == g_hp.visible_content_x &&
-        geom->src.y == g_hp.visible_content_y &&
-        geom->src.w == g_hp.visible_content_w &&
-        geom->src.h == g_hp.visible_content_h) {
-      fit_src_w = geom->src.w;
-      fit_src_h = geom->src.h;
-    } else {
-      fit_src_w = display_w > 0 ? display_w : geom->src.w;
-      fit_src_h = display_h > 0 ? display_h : geom->src.h;
-    }
+    /* Fit using the actual sampled backing/source rectangle. Apple HP often
+     * reports logical display dimensions that differ slightly from the backing
+     * it actually returns (for example 1616x1010 vs 3211x2007). Using the
+     * logical size for presentation introduces small bars and makes the source
+     * overlay appear larger than the destination box. */
+    fit_src_w = geom->src.w;
+    fit_src_h = geom->src.h;
     fit_w = geom->output_w;
     fit_h = (int)(((long long)fit_w * (long long)fit_src_h) / (long long)fit_src_w);
     if (fit_h > geom->output_h) {
@@ -3229,6 +3277,21 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       }
       g_hp.initial_full_refresh_done = 0;
       g_hp.initial_full_refresh_retries = 0;
+      if (!g_live.window_user_sized) {
+        uint16_t startup_target_w = 0;
+        uint16_t startup_target_h = 0;
+        if (apple_hp_compute_dynamic_resolution_target(client, &startup_target_w, &startup_target_h) &&
+            startup_target_w != 0 && startup_target_h != 0 &&
+            apple_hp_dynamic_target_materially_diff(startup_target_w, startup_target_h,
+                                                    scaled_w, scaled_h)) {
+          g_live.last_runtime_w = startup_target_w;
+          g_live.last_runtime_h = startup_target_h;
+          if (!maybe_send_dynamic_resolution_update(client, "startup-layout", TRUE)) {
+            free(payload);
+            return FALSE;
+          }
+        }
+      }
     }
     if (client && scaled_w != 0 && scaled_h != 0 &&
         (scaled_w != prev_display_w || scaled_h != prev_display_h ||

@@ -351,15 +351,12 @@ apple_hp_make_set_display_message(uint8_t combine_all_displays, uint32_t display
 }
 
 static inline struct apple_hp_scale_factor_message
-apple_hp_make_native_scale_factor_message(void) {
+apple_hp_make_scale_factor_message(double scale) {
   struct apple_hp_scale_factor_message msg;
-  static const uint8_t kNativeScaleFactorBe[8] = {
-      0x3f, 0xea, 0x75, 0x92, 0x03, 0xca, 0xe7, 0x59,
-  };
 
   memset(&msg, 0, sizeof(msg));
   msg.type = APPLE_HP_MSG_SCALE_FACTOR;
-  memcpy(msg.scale_be, kNativeScaleFactorBe, sizeof(msg.scale_be));
+  apple_hp_store_be_double(msg.scale_be, scale);
   return msg;
 }
 
