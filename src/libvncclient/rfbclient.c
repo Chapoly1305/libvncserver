@@ -881,6 +881,26 @@ SetClientAuthSchemes(rfbClient* client,const uint32_t *authSchemes, int size)
   }
 }
 
+void
+rfbClientEnableARDHighPerf(rfbClient* client, rfbBool enable)
+{
+  if (!client)
+    return;
+  client->enableARDHighPerf = enable;
+}
+
+rfbBool
+rfbClientGetARDSessionKey(const rfbClient* client, const uint8_t **key, size_t *len)
+{
+  if (!client || !client->ardSessionKeyReady)
+    return FALSE;
+  if (key)
+    *key = client->ardSessionKey;
+  if (len)
+    *len = client->ardSessionKeyLen;
+  return TRUE;
+}
+
 rfbBool
 rfbClientSetARDAuthRealm(rfbClient *client, const char *realm)
 {
@@ -1153,6 +1173,8 @@ InitialiseRFBConnection(rfbClient* client)
   }
 
   ci.shared = (client->appData.shareDesktop ? 1 : 0);
+  if (client->appData.hasClientInitFlags)
+    ci.shared = client->appData.clientInitFlags;
 
   if (!WriteToRFBServer(client,  (char *)&ci, sz_rfbClientInitMsg)) return FALSE;
 
@@ -1200,7 +1222,6 @@ InitialiseRFBConnection(rfbClient* client)
 rfbBool
 SetFormatAndEncodings(rfbClient* client)
 {
-  rfbSetPixelFormatMsg spf;
   union {
     char bytes[sz_rfbSetEncodingsMsg + MAX_ENCODINGS*4];
     rfbSetEncodingsMsg msg;
@@ -1214,19 +1235,8 @@ SetFormatAndEncodings(rfbClient* client)
   rfbBool requestLastRectEncoding = FALSE;
   rfbClientProtocolExtension* e;
 
-  if (!SupportsClient2Server(client, rfbSetPixelFormat)) return TRUE;
-
-  spf.type = rfbSetPixelFormat;
-  spf.pad1 = 0;
-  spf.pad2 = 0;
-  spf.format = client->format;
-  spf.format.redMax = rfbClientSwap16IfLE(spf.format.redMax);
-  spf.format.greenMax = rfbClientSwap16IfLE(spf.format.greenMax);
-  spf.format.blueMax = rfbClientSwap16IfLE(spf.format.blueMax);
-
-  if (!WriteToRFBServer(client, (char *)&spf, sz_rfbSetPixelFormatMsg))
+  if (!SendCurrentPixelFormat(client))
     return FALSE;
-
 
   if (!SupportsClient2Server(client, rfbSetEncodings)) return TRUE;
 
@@ -1420,6 +1430,61 @@ SetFormatAndEncodings(rfbClient* client)
   se->nEncodings = rfbClientSwap16IfLE(se->nEncodings);
 
   if (!WriteToRFBServer(client, buf.bytes, len)) return FALSE;
+
+  return TRUE;
+}
+
+rfbBool
+SendCurrentPixelFormat(rfbClient* client)
+{
+  rfbSetPixelFormatMsg spf;
+
+  if (!SupportsClient2Server(client, rfbSetPixelFormat)) return TRUE;
+
+  spf.type = rfbSetPixelFormat;
+  spf.pad1 = 0;
+  spf.pad2 = 0;
+  spf.format = client->format;
+  spf.format.redMax = rfbClientSwap16IfLE(spf.format.redMax);
+  spf.format.greenMax = rfbClientSwap16IfLE(spf.format.greenMax);
+  spf.format.blueMax = rfbClientSwap16IfLE(spf.format.blueMax);
+
+  if (!WriteToRFBServer(client, (char *)&spf, sz_rfbSetPixelFormatMsg))
+    return FALSE;
+
+  return TRUE;
+}
+
+rfbBool
+SendEncodingsOrdered(rfbClient* client, const int32_t* encodings, size_t count)
+{
+  union {
+    char bytes[sz_rfbSetEncodingsMsg + MAX_ENCODINGS*4];
+    rfbSetEncodingsMsg msg;
+  } buf;
+  rfbSetEncodingsMsg *se = &buf.msg;
+  uint32_t *encs = (uint32_t *)(&buf.bytes[sz_rfbSetEncodingsMsg]);
+  size_t i;
+  size_t len;
+
+  if (!SupportsClient2Server(client, rfbSetEncodings)) return TRUE;
+  if (!encodings && count != 0) return FALSE;
+  if (count > MAX_ENCODINGS) {
+    rfbClientErr("Too many explicit encodings requested: %lu > %d\n",
+                 (unsigned long)count, MAX_ENCODINGS);
+    return FALSE;
+  }
+
+  memset(&buf, 0, sizeof(buf));
+  se->type = rfbSetEncodings;
+  se->pad = 0;
+  se->nEncodings = rfbClientSwap16IfLE((uint16_t)count);
+  for (i = 0; i < count; ++i)
+    encs[i] = rfbClientSwap32IfLE((uint32_t)encodings[i]);
+
+  len = sz_rfbSetEncodingsMsg + count * 4;
+  if (!WriteToRFBServer(client, buf.bytes, (unsigned int)len))
+    return FALSE;
 
   return TRUE;
 }
@@ -2522,8 +2587,11 @@ HandleRFBServerMessage(rfbClient* client)
       client->GotFrameBufferUpdate(client, rect.r.x, rect.r.y, rect.r.w, rect.r.h);
     }
 
-    if (!SendIncrementalFramebufferUpdateRequest(client))
+    if (client->suppressNextIncrementalRequest) {
+      client->suppressNextIncrementalRequest = FALSE;
+    } else if (!SendIncrementalFramebufferUpdateRequest(client)) {
       return FALSE;
+    }
 
     if (client->FinishedFrameBufferUpdate)
       client->FinishedFrameBufferUpdate(client);

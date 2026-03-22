@@ -121,6 +121,9 @@ typedef struct rfbClientData {
 typedef struct {
   rfbBool shareDesktop;
   rfbBool viewOnly;
+  rfbBool deferInitialSetup;
+  rfbBool hasClientInitFlags;
+  uint8_t clientInitFlags;
 
   const char* encodingsString;
 
@@ -247,6 +250,8 @@ typedef void (*GotBitmapProc)(struct _rfbClient* client, const uint8_t* buffer, 
 typedef rfbBool (*GotJpegProc)(struct _rfbClient* client, const uint8_t* buffer, int length, int x, int y, int w, int h);
 typedef rfbBool (*LockWriteToTLSProc)(struct _rfbClient* client);   /** @deprecated */
 typedef rfbBool (*UnlockWriteToTLSProc)(struct _rfbClient* client); /** @deprecated */
+typedef rfbBool (*ReadFromTransportProc)(struct _rfbClient* client, char *out, unsigned int n);
+typedef rfbBool (*WriteToTransportProc)(struct _rfbClient* client, const char *buf, unsigned int n);
 
 #ifdef LIBVNCSERVER_HAVE_SASL
 typedef char* (*GetUserProc)(struct _rfbClient* client);
@@ -293,6 +298,8 @@ typedef struct _rfbClient {
 	char buf[RFB_BUF_SIZE];
 	char *bufoutptr;
 	unsigned int buffered;
+	ReadFromTransportProc ReadFromTransport;
+	WriteToTransportProc WriteToTransport;
 
 	/* The zlib encoding requires expansion/decompression/deflation of the
 	   compressed data in the "buffer" above into another, result buffer.
@@ -391,6 +398,11 @@ typedef struct _rfbClient {
 
 	/** The selected security types */
 	uint32_t authScheme, subAuthScheme;
+	uint32_t ardAuthType;
+	rfbBool enableARDHighPerf;
+	rfbBool ardSessionKeyReady;
+	size_t ardSessionKeyLen;
+	uint8_t ardSessionKey[32];
 
 	/** The TLS session for Anonymous TLS and VeNCrypt */
 	void* tlsSession;
@@ -488,6 +500,7 @@ typedef struct _rfbClient {
 	MUTEX(tlsRwMutex);
 
 	rfbBool requestedResize;
+	rfbBool suppressNextIncrementalRequest;
         /**
          * Used for intended dimensions, rfbClient.width and rfbClient.height are used to manage the real framebuffer dimensions.
 	 */
@@ -535,6 +548,8 @@ extern rfbClientLogProc rfbClientLog,rfbClientErr;
 extern rfbBool ConnectToRFBServer(rfbClient* client,const char *hostname, int port);
 extern rfbBool ConnectToRFBRepeater(rfbClient* client,const char *repeaterHost, int repeaterPort, const char *destHost, int destPort);
 extern void SetClientAuthSchemes(rfbClient* client,const uint32_t *authSchemes, int size);
+extern void rfbClientEnableARDHighPerf(rfbClient* client, rfbBool enable);
+extern rfbBool rfbClientGetARDSessionKey(const rfbClient* client, const uint8_t **key, size_t *len);
 extern rfbBool rfbClientSetARDAuthRealm(rfbClient *client, const char *realm);
 extern rfbBool rfbClientSetARDAuthClientPrincipal(rfbClient *client, const char *principal);
 extern rfbBool rfbClientSetARDAuthServicePrincipal(rfbClient *client, const char *principal);
@@ -557,6 +572,8 @@ extern rfbBool InitialiseRFBConnection(rfbClient* client);
  * false otherwise
  */
 extern rfbBool SetFormatAndEncodings(rfbClient* client);
+extern rfbBool SendCurrentPixelFormat(rfbClient* client);
+extern rfbBool SendEncodingsOrdered(rfbClient* client, const int32_t* encodings, size_t count);
 extern rfbBool SendIncrementalFramebufferUpdateRequest(rfbClient* client);
 /**
  * Sends a framebuffer update request to the server. A VNC client may request an

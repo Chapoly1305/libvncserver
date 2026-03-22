@@ -8,3 +8,4 @@ doc/html/
 .cachexs
 .log
 compile_commands.json
+build-debug/

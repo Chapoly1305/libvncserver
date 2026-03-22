@@ -550,6 +550,17 @@ SET_TARGET_PROPERTIES(${LIBVNCSERVER_LIBRARIES}
 		PROPERTIES SOVERSION "${VERSION_SO}" VERSION "${LibVNCServer_VERSION}" C_STANDARD 90
 )
 
+function(enable_debug_sanitizers target_name)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(${target_name} PRIVATE
+      "$<$<CONFIG:Debug>:-fsanitize=address>"
+      "$<$<CONFIG:Debug>:-fsanitize=undefined>"
+      "$<$<CONFIG:Debug>:-fno-omit-frame-pointer>"
+    )
+    set_property(TARGET ${target_name} APPEND_STRING PROPERTY LINK_FLAGS_DEBUG " -fsanitize=address -fsanitize=undefined")
+  endif()
+endfunction()
+
 # EXAMPLES
 set(LIBVNCSERVER_EXAMPLES
     backchannel
@@ -616,6 +627,13 @@ if(SDL2_FOUND)
   )
 endif(SDL2_FOUND)
 
+if(APPLE)
+  set(LIBVNCCLIENT_EXAMPLES
+    ${LIBVNCCLIENT_EXAMPLES}
+    applehpdebug
+  )
+endif()
+
 if(GTK2_FOUND)
   include_directories(${GTK2_INCLUDE_DIRS})
   set(LIBVNCCLIENT_EXAMPLES
@@ -641,6 +659,10 @@ if(FFMPEG_FOUND)
   )
 endif(FFMPEG_FOUND)
 
+if(APPLE AND WITH_LIBVNCCLIENT AND WITH_EXAMPLES)
+  enable_debug_sanitizers(vncclient)
+endif()
+
 if(WITH_EXAMPLES)
   if(WITH_LIBVNCSERVER)
     foreach(e ${LIBVNCSERVER_EXAMPLES})
@@ -661,6 +683,10 @@ if(WITH_EXAMPLES)
       set_target_properties(client_examples_${e} PROPERTIES OUTPUT_NAME ${e})
       set_target_properties(client_examples_${e} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/examples/client)
       target_link_libraries(client_examples_${e} vncclient ${CMAKE_THREAD_LIBS_INIT} ${SDL2_LIBRARY} ${GTK2_LIBRARIES} ${FFMPEG_LIBRARIES} ${LIBSSHTUNNEL_LIBRARY})
+      if(APPLE AND e STREQUAL "applehpdebug")
+        target_link_libraries(client_examples_${e} "-framework Security" "-framework CoreFoundation" "-framework GSS" "-framework Kerberos")
+        enable_debug_sanitizers(client_examples_${e})
+      endif()
     endforeach(e ${LIBVNCCLIENT_EXAMPLES})
   endif(WITH_LIBVNCCLIENT)
 

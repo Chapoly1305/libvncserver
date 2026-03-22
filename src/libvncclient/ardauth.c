@@ -6,6 +6,7 @@
 #include "crypto.h"
 
 #if defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <GSS/GSS.h>
 #endif
@@ -53,6 +54,27 @@ static void FreeARDUserCredential(rfbCredential *cred) {
     free(cred->userCredential.username);
     free(cred->userCredential.password);
     free(cred);
+}
+
+static void ResetARDSessionKey(rfbClient *client) {
+    if (!client)
+        return;
+    client->ardAuthType = 0;
+    client->ardSessionKeyReady = FALSE;
+    client->ardSessionKeyLen = 0;
+    memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
+}
+
+static rfbBool StoreARDSessionKey(rfbClient *client, uint32_t auth_type,
+                                  const uint8_t *key, size_t len) {
+    if (!client || !key || len < 16)
+        return FALSE;
+    memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
+    memcpy(client->ardSessionKey, key, 16);
+    client->ardSessionKeyLen = 16;
+    client->ardSessionKeyReady = TRUE;
+    client->ardAuthType = auth_type;
+    return TRUE;
 }
 
 static const char *GetARDSRPMethodName(uint32_t auth_type) {
@@ -238,6 +260,7 @@ static rfbBool HandleARDAuthDH(rfbClient *client) {
         rfbClientErr("HandleARDAuthDH: hashing shared key failed\n");
         goto out;
     }
+    StoreARDSessionKey(client, rfbARDAuthDH, shared, MD5_HASH_SIZE);
 
     if (!client->GetCredential) {
         rfbClientErr("HandleARDAuthDH: GetCredential callback is not set\n");
@@ -304,6 +327,8 @@ struct ardsrp_step2 {
     size_t m1_len;
     const uint8_t *options;
     size_t options_len;
+    uint8_t session_key[16];
+    rfbBool have_session_key;
 };
 
 static int ComputeSRPStep2(const char *password, uint32_t auth_type,
@@ -630,6 +655,9 @@ static int BuildSRPStep2Inner(rfbClient *client, uint32_t auth_type,
         return FALSE;
     if (!ComputeSRPStep2(password, auth_type, &parsed, &step2))
         return FALSE;
+    if (step2.have_session_key)
+        StoreARDSessionKey(client, auth_type, step2.session_key,
+                           sizeof(step2.session_key));
     ok = BuildSRPStep2Response(&step2, outbuf, outcap, outlen);
     if (!ok) {
         rfbClientErr("ard %s: output buffer too small for response\n",
@@ -806,6 +834,14 @@ static int ComputeSRPStep2(const char *password, uint32_t auth_type,
     }
     memcpy(K, digest, sizeof(digest));
     k_len = sizeof(digest);
+#if defined(__APPLE__)
+    {
+        uint8_t session_key[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(K, (CC_LONG)k_len, session_key);
+        memcpy(step2->session_key, session_key, sizeof(step2->session_key));
+        step2->have_session_key = TRUE;
+    }
+#endif
     HashSHA512TwoParts(hN, Np, pad_len, NULL, 0);
     HashSHA512TwoParts(hg, gp, pad_len, NULL, 0);
     memcpy(hu, empty_user_hash, sizeof(hu));
@@ -1298,6 +1334,10 @@ static rfbBool HandleARDAuthKerberosGSSAPI(rfbClient *client) {
         gss_release_buffer(&minor, &output);
         goto done;
     }
+    if (output.length >= 16) {
+        StoreARDSessionKey(client, rfbARDAuthKerberosGSSAPI,
+                           (const uint8_t *)output.value, output.length);
+    }
     gss_release_buffer(&minor, &output);
     ok = TRUE;
 
@@ -1335,6 +1375,7 @@ static rfbBool HandleARDAuthKerberosGSSAPI(rfbClient *client) {
 rfbBool rfbClientHandleARDAuth(rfbClient *client, uint32_t authScheme) {
     if (!client)
         return FALSE;
+    ResetARDSessionKey(client);
 
     switch (authScheme) {
     case rfbARDAuthDH:

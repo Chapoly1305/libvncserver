@@ -43,6 +43,8 @@
 #include "turbojpeg.h"
 #endif
 
+static rfbBool SendDefaultInitialSetup(rfbClient* client);
+
 static void Dummy(rfbClient* client) {
 }
 static rfbBool DummyPoint(rfbClient* client, int x, int y) {
@@ -386,6 +388,11 @@ rfbClient* rfbGetClient(int bitsPerSample,int samplesPerPixel,
 
   client->authScheme = 0;
   client->subAuthScheme = 0;
+  client->ardAuthType = 0;
+  client->enableARDHighPerf = FALSE;
+  client->ardSessionKeyReady = FALSE;
+  client->ardSessionKeyLen = 0;
+  memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
   client->GetCredential = NULL;
   client->tlsSession = NULL;
   client->LockWriteToTLS = NULL;
@@ -443,15 +450,22 @@ rfbBool rfbClientInitialise(rfbClient* client) {
   if (!client->MallocFrameBuffer(client))
     return FALSE;
 
-  if (!SetFormatAndEncodings(client))
-    return FALSE;
-
   if (client->updateRect.x < 0) {
     client->updateRect.x = client->updateRect.y = 0;
     client->updateRect.w = client->width;
     client->updateRect.h = client->height;
     client->isUpdateRectManagedByLib = TRUE;
   }
+
+  if (client->appData.deferInitialSetup)
+    return TRUE;
+
+  return SendDefaultInitialSetup(client);
+}
+
+static rfbBool SendDefaultInitialSetup(rfbClient* client) {
+  if (!SetFormatAndEncodings(client))
+    return FALSE;
 
   if (client->appData.scaleSetting>1)
   {

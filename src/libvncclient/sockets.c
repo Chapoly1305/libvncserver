@@ -77,6 +77,9 @@ ReadFromRFBServer(rfbClient* client, char *out, unsigned int n)
   if(!out)
     return FALSE;
 
+  if (client->ReadFromTransport)
+    return client->ReadFromTransport(client, out, n);
+
   if (client->serverPort==-1) {
     /* vncrec playing */
     rfbVNCRec* rec = client->vncRec;
@@ -261,6 +264,9 @@ WriteToRFBServer(rfbClient* client, const char *buf, unsigned int n)
 
   if (client->serverPort==-1)
     return TRUE; /* vncrec playing */
+
+  if (client->WriteToTransport)
+    return client->WriteToTransport(client, buf, n);
 
   if (client->tlsSession) {
     /* WriteToTLS() will guarantee either everything is written, or error/eof returns */
@@ -889,5 +895,4 @@ int WaitForMessage(rfbClient* client,unsigned int usecs)
 
   return num;
 }
-
 
