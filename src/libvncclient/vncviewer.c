@@ -38,6 +38,7 @@
 #include <string.h>
 #include <time.h>
 #include <rfb/rfbclient.h>
+#include "applehp.h"
 #include "tls.h"
 #if defined(LIBVNCSERVER_HAVE_LIBZ) && defined(LIBVNCSERVER_HAVE_LIBJPEG)
 #include "turbojpeg.h"
@@ -605,6 +606,7 @@ void rfbClientCleanup(rfbClient* client) {
   free(client->serverHost);
   free(client->destHost);
   free(client->clientAuthSchemes);
+  rfbClientCleanupAppleHP(client);
   free(client->ardAuthRealm);
   free(client->ardAuthClientPrincipal);
   free(client->ardAuthServicePrincipal);

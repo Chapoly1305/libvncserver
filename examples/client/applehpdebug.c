@@ -29,8 +29,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "applehp_protocol.h"
-
 #if defined(__has_include)
 #if __has_include(<SDL.h>)
 #include <SDL.h>
@@ -131,23 +129,6 @@ static struct apple_hp_frame_stats g_frame = {0};
 static struct apple_hp_runtime_options g_runtime = {0};
 static struct apple_hp_session_state g_hp = {0};
 
-/* Confirmed from native Screen Sharing.app on 24G231:
- * the first post-rekey client body is 0x0d01000000000000, i.e. a SetDisplayMessage
- * with combine-all-displays enabled and no explicit display id. */
-static const int32_t kNativePostAuthEncodings[] = {
-    0x6,
-    0x10,
-    (int32_t)0xffffff11u,
-    APPLE_HP_ENCODING_CURSOR_IMAGE,
-    0x44c,
-    (int32_t)0xffffff21u,
-    0x44d,
-    APPLE_HP_ENCODING_DISPLAY_LAYOUT,
-    APPLE_HP_ENCODING_DISPLAY_MODE,
-    APPLE_HP_ENCODING_KEYBOARD_LAYOUT,
-    APPLE_HP_ENCODING_DISPLAY_INFO,
-};
-static const int32_t kAppleHPProModeEncoding = APPLE_HP_ENCODING_MEDIA_STREAM;
 static const uint16_t kAppleHPFramebufferSlack = 2;
 
 #if defined(APPLEHPDEBUG_HAS_SDL)
@@ -764,6 +745,11 @@ static uint16_t read_be_u16(const uint8_t *p) {
   return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
 
+static uint32_t read_be_u32(const uint8_t *p) {
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
+         (uint32_t)p[3];
+}
+
 static void write_be_u16(uint8_t *p, uint16_t v) {
   p[0] = (uint8_t)((v >> 8) & 0xff);
   p[1] = (uint8_t)(v & 0xff);
@@ -808,20 +794,22 @@ static int raw_read_exact(rfbClient *client, void *out, size_t len) {
       len -= take;
       continue;
     }
-    ssize_t n = read(client->sock, p, len);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      if ((errno == EAGAIN || errno == EWOULDBLOCK) && wait_for_socket_io(client->sock, 0))
-        continue;
-      rfbClientErr("apple-hp transport: read failed (%d: %s)\n", errno, strerror(errno));
-      return 0;
+    {
+      ssize_t n = read(client->sock, p, len);
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) && wait_for_socket_io(client->sock, 0))
+          continue;
+        rfbClientErr("apple-hp transport: read failed (%d: %s)\n", errno, strerror(errno));
+        return 0;
+      }
+      if (n == 0) {
+        rfbClientLog("apple-hp transport: server closed connection\n");
+        return 0;
+      }
+      p += (size_t)n;
+      len -= (size_t)n;
     }
-    if (n == 0) {
-      rfbClientLog("apple-hp transport: server closed connection\n");
-      return 0;
-    }
-    p += (size_t)n;
-    len -= (size_t)n;
   }
   return 1;
 }
@@ -867,17 +855,6 @@ static int aes_crypt(int op, int options, const uint8_t *key, const uint8_t *iv,
 static int aes_ecb_decrypt_block(const uint8_t *key, const uint8_t *in, uint8_t *out) {
   size_t out_len = 0;
   return aes_crypt(kCCDecrypt, kCCOptionECBMode, key, NULL, in, 16, out, &out_len);
-}
-
-static uint32_t read_be_u32(const uint8_t *p) {
-  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
-         (uint32_t)p[3];
-}
-
-static uint64_t read_be_u64(const uint8_t *p) {
-  return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) | ((uint64_t)p[2] << 40) |
-         ((uint64_t)p[3] << 32) | ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
-         ((uint64_t)p[6] << 8) | (uint64_t)p[7];
 }
 
 static int parse_u32_env(const char *name, uint32_t *out) {
@@ -1008,159 +985,10 @@ static uint16_t apple_hp_request_height(rfbClient *client) {
 
 static rfbBool apple_hp_resize_framebuffer_if_needed(rfbClient *client, uint16_t width,
                                                      uint16_t height) {
-  uint16_t alloc_w;
-  uint16_t alloc_h;
   if (!client || width == 0 || height == 0) return TRUE;
-  alloc_w = width;
-  alloc_h = height;
-  if (alloc_w <= (uint16_t)(0xffff - kAppleHPFramebufferSlack))
-    alloc_w = (uint16_t)(alloc_w + kAppleHPFramebufferSlack);
-  if (alloc_h <= (uint16_t)(0xffff - kAppleHPFramebufferSlack))
-    alloc_h = (uint16_t)(alloc_h + kAppleHPFramebufferSlack);
-  if (alloc_w <= (uint16_t)client->width && alloc_h <= (uint16_t)client->height) {
-    if (width != g_hp.last_backing_w || height != g_hp.last_backing_h) {
-      /* Resolution changed. Even if we have enough space, we must re-allocate
-       * (or at least zero-initialize) to ensure no stale data from the previous
-       * resolution remains in the framebuffer or SDL texture. */
-      APPLEHP_DEBUG_LOG("apple-hp: backing resolution changed from %ux%u to %ux%u (stride update needed)\n",
-                        (unsigned)g_hp.last_backing_w, (unsigned)g_hp.last_backing_h,
-                        (unsigned)width, (unsigned)height);
-      g_hp.last_backing_w = width;
-      g_hp.last_backing_h = height;
-      client->width = alloc_w;
-      client->height = alloc_h;
-      client->screen.width = rfbClientSwap16IfLE(alloc_w);
-      client->screen.height = rfbClientSwap16IfLE(alloc_h);
-      return client->MallocFrameBuffer(client);
-    }
-    return TRUE;
-  }
-
   g_hp.last_backing_w = width;
   g_hp.last_backing_h = height;
-  client->width = alloc_w;
-  client->height = alloc_h;
-  client->screen.width = rfbClientSwap16IfLE(alloc_w);
-  client->screen.height = rfbClientSwap16IfLE(alloc_h);
-  if (client->isUpdateRectManagedByLib) {
-    client->updateRect.x = 0;
-    client->updateRect.y = 0;
-    client->updateRect.w = alloc_w;
-    client->updateRect.h = alloc_h;
-  }
-  rfbClientLog("apple-hp: resizing local framebuffer to %ux%u for backing %ux%u from AppleDisplayLayout\n",
-               (unsigned)alloc_w, (unsigned)alloc_h, (unsigned)width, (unsigned)height);
-  return client->MallocFrameBuffer(client);
-}
-
-static int send_blob(rfbClient *client, const void *buf, size_t len, const char *label) {
-  if (!client || !buf || !label || len == 0) return 0;
-  rfbClientLog("%s: sending %zu bytes\n", label, len);
-  if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)len)) return 0;
-  return 1;
-}
-
-static int send_viewer_info_blob(rfbClient *client) {
-  struct apple_hp_viewer_info_message msg;
-  size_t len;
-
-  if (!client) return 0;
-  msg = apple_hp_make_native_viewer_info();
-  len = sizeof(msg);
-
-  rfbClientLog("apple-hp ViewerInfo: sending %zu bytes\n", len);
-  if (!WriteToRFBServer(client, (const char *)&msg, (unsigned int)len)) return 0;
-  return 1;
-}
-
-static int send_display_configuration_blob(rfbClient *client) {
-  struct apple_hp_display_configuration_message msg;
-  uint8_t *buf = (uint8_t *)&msg;
-  size_t len;
-  size_t display_offset = 12;
-  const size_t kDisplayInfoSizeOff = 0x00;
-  uint16_t display_info_size;
-  size_t effective_len;
-
-  msg = apple_hp_make_native_display_configuration();
-  len = sizeof(msg);
-  if (len <= display_offset) {
-    rfbClientErr("apple-hp SetDisplayConfiguration: payload too short (%zu)\n", len);
-    return 0;
-  }
-
-  display_info_size = read_be_u16(buf + display_offset + kDisplayInfoSizeOff);
-  if (display_offset + (size_t)display_info_size > len) {
-    rfbClientErr("apple-hp SetDisplayConfiguration: unexpected displayInfoSize=%u len=%zu\n",
-                 (unsigned)display_info_size, len);
-    return 0;
-  }
-
-  /* Native encrypted 0x1d stops at the 12-byte message header plus the
-   * displayInfoSize payload. */
-  effective_len = display_offset + (size_t)display_info_size;
-
-  rfbClientLog("apple-hp SetDisplayConfiguration: sending %zu bytes display_count=1 flags=0x00000000\n",
-               effective_len);
-  if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)effective_len)) return 0;
-  return 1;
-}
-
-static void patch_display_configuration_dimensions(struct apple_hp_display_configuration_message *msg,
-                                                   uint16_t logical_w,
-                                                   uint16_t logical_h) {
-  static const struct {
-    uint32_t width;
-    uint32_t height;
-    uint32_t scaled_width;
-    uint32_t scaled_height;
-    double refresh_rate;
-    uint32_t flags;
-  } kBaseModes[APPLE_HP_DISPLAY_CONFIG_MODE_COUNT] = {
-      {3840, 2160, 1920, 1080, 60.0, 0},
-      {2880, 1800, 1440, 900, 60.0, 0},
-      {3840, 2160, 1920, 1080, 60.0, 0},
-      {2880, 1620, 1440, 810, 60.0, 0},
-      {2624, 1696, 1312, 848, 60.0, 0},
-  };
-  size_t i;
-  uint32_t max_w = 0;
-  uint32_t max_h = 0;
-  double sx;
-  double sy;
-
-  if (!msg || logical_w == 0 || logical_h == 0) return;
-
-  sx = (double)logical_w / 1920.0;
-  sy = (double)logical_h / 1080.0;
-  apple_hp_store_be32(msg->display.display_flags_be,
-                      APPLE_HP_DISPLAY_CONFIG_FLAG_DYNAMIC_RESOLUTION);
-  apple_hp_store_be16(msg->display.current_mode_index_be, 0);
-  apple_hp_store_be16(msg->display.preferred_mode_index_be, 0);
-  for (i = 0; i < APPLE_HP_DISPLAY_CONFIG_MODE_COUNT; ++i) {
-    uint32_t width = (uint32_t)((kBaseModes[i].width * sx) + 0.5);
-    uint32_t height = (uint32_t)((kBaseModes[i].height * sy) + 0.5);
-    uint32_t scaled_width = (uint32_t)((kBaseModes[i].scaled_width * sx) + 0.5);
-    uint32_t scaled_height = (uint32_t)((kBaseModes[i].scaled_height * sy) + 0.5);
-    if (width == 0) width = logical_w;
-    if (height == 0) height = logical_h;
-    if (scaled_width == 0) scaled_width = logical_w;
-    if (scaled_height == 0) scaled_height = logical_h;
-    if (width > max_w) max_w = width;
-    if (height > max_h) max_h = height;
-    apple_hp_store_be32(msg->display.modes[i].width_be, width);
-    apple_hp_store_be32(msg->display.modes[i].height_be, height);
-    apple_hp_store_be32(msg->display.modes[i].scaled_width_be, scaled_width);
-    apple_hp_store_be32(msg->display.modes[i].scaled_height_be, scaled_height);
-    apple_hp_store_be_double(msg->display.modes[i].refresh_rate_be, kBaseModes[i].refresh_rate);
-    apple_hp_store_be32(msg->display.modes[i].flags_be, kBaseModes[i].flags);
-  }
-  if (max_w == 0) max_w = (uint32_t)logical_w * 2u;
-  if (max_h == 0) max_h = (uint32_t)logical_h * 2u;
-  apple_hp_store_be32(msg->display.max_width_be, max_w);
-  apple_hp_store_be32(msg->display.max_height_be, max_h);
-  apple_hp_store_be_float(msg->display.physical_width_be, (float)(max_w * (1.0 / 10.4)));
-  apple_hp_store_be_float(msg->display.physical_height_be, (float)(max_h * (1.0 / 10.4)));
+  return rfbClientAppleHPResizeFramebufferIfNeeded(client, width, height, kAppleHPFramebufferSlack);
 }
 
 static int dynamic_resolution_target_matches_display(rfbClient *client,
@@ -1175,44 +1003,14 @@ static int send_runtime_display_configuration_blob(rfbClient *client,
                                                    uint16_t logical_w,
                                                    uint16_t logical_h,
                                                    const char *reason) {
-  struct apple_hp_display_configuration_message msg;
-  uint8_t *buf = (uint8_t *)&msg;
-  size_t effective_len;
-
   if (!client || logical_w == 0 || logical_h == 0) return 0;
   if (dynamic_resolution_target_matches_display(client, logical_w, logical_h)) return 1;
-  msg = apple_hp_make_native_display_configuration();
-  patch_display_configuration_dimensions(&msg, logical_w, logical_h);
-  effective_len = sizeof(msg);
-  rfbClientLog("apple-hp: sending runtime SetDisplayConfiguration %ux%u reason=%s\n",
-               (unsigned)logical_w, (unsigned)logical_h,
-               reason ? reason : "unknown");
-  if (!WriteToRFBServer(client, (const char *)buf, (unsigned int)effective_len)) return 0;
+  if (!rfbClientAppleHPSendRuntimeDisplayConfiguration(client, logical_w, logical_h, reason)) return 0;
   g_hp.last_dynamic_request_w = logical_w;
   g_hp.last_dynamic_request_h = logical_h;
   g_hp.dynamic_request_in_flight = 1;
   g_hp.dynamic_refresh_queued_for_request = 0;
   return 1;
-}
-
-static int send_native_set_encryption_message(rfbClient *client) {
-  struct apple_hp_set_encryption_message msg = apple_hp_make_native_prelude_set_encryption();
-  return send_blob(client, &msg, sizeof(msg), "apple-hp SetEncryptionMessage");
-}
-
-static int send_native_set_mode_message(rfbClient *client) {
-  struct apple_hp_set_mode_message msg = apple_hp_make_native_prelude_set_mode();
-  return send_blob(client, &msg, sizeof(msg), "apple-hp SetModeMessage");
-}
-
-static int send_post_rekey_set_encryption_stage2(rfbClient *client) {
-  struct apple_hp_set_encryption_stage2_message msg = apple_hp_make_post_rekey_set_encryption_stage2();
-  return send_blob(client, &msg, sizeof(msg), "apple-hp post-0x44f SetEncryptionMessage");
-}
-
-static int send_set_display_message(rfbClient *client) {
-  struct apple_hp_set_display_message msg = apple_hp_make_set_display_message(1, 0);
-  return send_blob(client, &msg, sizeof(msg), "apple-hp post-rekey hello");
 }
 
 static double apple_hp_runtime_scale_factor(void) {
@@ -1241,81 +1039,6 @@ static double apple_hp_runtime_scale_factor(void) {
   return 1.0;
 #endif
 }
-
-static int send_native_scale_factor_message(rfbClient *client) {
-  double scale = apple_hp_runtime_scale_factor();
-  struct apple_hp_scale_factor_message msg = apple_hp_make_scale_factor_message(scale);
-  rfbClientLog("apple-hp: using scale factor %.6f\n", scale);
-  return send_blob(client, &msg, sizeof(msg), "apple-hp scale factor");
-}
-
-static int send_auto_pasteboard_command(rfbClient *client, uint16_t selector) {
-  struct apple_hp_auto_pasteboard_message msg =
-      apple_hp_make_auto_pasteboard_message((uint8_t)(selector & 0xff));
-  rfbClientLog("apple-hp: sending AutoPasteboard selector=%u\n", (unsigned)selector);
-  return WriteToRFBServer(client, (const char *)&msg, sizeof(msg));
-}
-
-static int send_native_post_auth_encodings(rfbClient *client) {
-  int32_t encodings[(sizeof(kNativePostAuthEncodings) / sizeof(kNativePostAuthEncodings[0])) + 2];
-  size_t count = 0;
-  size_t i;
-  int add_promode = env_flag_enabled("VNC_APPLE_HP_ADD_PROMODE_ENCODING");
-  int prefer_promode = env_flag_enabled("VNC_APPLE_HP_PREFER_PROMODE_ENCODING");
-
-  if (!client) return 0;
-
-  if (add_promode && prefer_promode) {
-    encodings[count++] = kAppleHPProModeEncoding;
-    rfbClientLog("apple-hp: prepending ProMode SetEncodings capability 0x%03x\n",
-                 kAppleHPProModeEncoding);
-  }
-
-  for (i = 0; i < sizeof(kNativePostAuthEncodings) / sizeof(kNativePostAuthEncodings[0]); ++i) {
-    if (add_promode && !prefer_promode && kNativePostAuthEncodings[i] == 0x44c) {
-      encodings[count++] = kAppleHPProModeEncoding;
-    }
-    encodings[count++] = kNativePostAuthEncodings[i];
-  }
-
-  if (add_promode && !prefer_promode) {
-    rfbClientLog("apple-hp: adding ProMode SetEncodings capability 0x%03x\n",
-                 kAppleHPProModeEncoding);
-  }
-
-  return SendEncodingsOrdered(client, encodings, count);
-}
-
-static void configure_native_post_rekey_pixel_format(rfbClient *client) {
-  if (!client) return;
-  client->format.bitsPerPixel = 32;
-  client->format.depth = 32;
-  client->format.bigEndian = 0;
-  client->format.trueColour = 1;
-  client->format.redMax = 255;
-  client->format.greenMax = 255;
-  client->format.blueMax = 255;
-  client->format.redShift = 16;
-  client->format.greenShift = 8;
-  client->format.blueShift = 0;
-}
-
-static int send_auto_framebuffer_update(rfbClient *client, uint16_t width, uint16_t height) {
-  uint8_t buf[16];
-
-  memset(buf, 0, sizeof(buf));
-  buf[0] = APPLE_HP_MSG_AUTO_FRAMEBUFFER_UPDATE;
-  buf[3] = 0x01;
-  memset(buf + 4, 0xff, 4);
-  buf[12] = (uint8_t)((width >> 8) & 0xff);
-  buf[13] = (uint8_t)(width & 0xff);
-  buf[14] = (uint8_t)((height >> 8) & 0xff);
-  buf[15] = (uint8_t)(height & 0xff);
-  rfbClientLog("apple-hp: sending AutoFrameBufferUpdate region=%ux%u\n",
-               (unsigned)width, (unsigned)height);
-  return WriteToRFBServer(client, (const char *)buf, sizeof(buf));
-}
-
 static int apple_hp_send_post_rekey_setup(rfbClient *client);
 
 static int apple_hp_read_next_record(rfbClient *client, struct apple_hp_transport_state *st) {
@@ -1437,11 +1160,6 @@ static rfbBool apple_hp_transport_write(rfbClient *client, const char *buf, unsi
   write_be_u16(plain, (uint16_t)n);
   memcpy(plain + 2, buf, n);
   filler_len = plain_len - ((size_t)n + 2u + CC_SHA1_DIGEST_LENGTH);
-  /* Native ScreenSharing.framework builds CBC records in a generic transport
-   * helper: body length, body bytes, trailing slack, then SHA1(seq || plain[..]).
-   * The transport layer does not branch on message type to choose filler bytes.
-   * Use deterministic zero-filled slack here instead of replay-era per-message
-   * filler tables. */
   (void)filler_len;
   write_be_u32(seq_be, st->send_seq);
   {
@@ -1478,11 +1196,6 @@ static int apple_hp_enable_transport(rfbClient *client, const uint8_t *next_key,
   memcpy(st->cbc_key, next_key, 16);
   memcpy(st->send_iv, next_iv, 16);
   memcpy(st->recv_iv, next_iv, 16);
-  /* Native pcap evidence shows 0x44f generation/counter=1, then encrypted
-   * 0x1d and 0x02 preface records consume send sequences 0 and 1 before the
-   * later native 0x0d SetDisplayMessage uses sequence 2. So counter-1 is only
-   * the correct starting point if we actually reproduce that encrypted
-   * preface. */
   st->send_seq = counter ? (counter - 1) : 0;
   st->recv_seq = counter ? (counter - 1) : 0;
   st->active = 1;
@@ -1495,23 +1208,12 @@ static int apple_hp_enable_transport(rfbClient *client, const uint8_t *next_key,
 
 static int configure_apple_hp_mode(rfbClient *client) {
   if (!g_runtime.apple_hp_mode || !client) return 1;
-
-  rfbClientEnableARDHighPerf(client, TRUE);
-  client->appData.deferInitialSetup = TRUE;
-  client->appData.hasClientInitFlags = TRUE;
-  client->appData.clientInitFlags = 0xC1;
-  rfbClientLog("apple-hp: using ClientInit override 0xC1\n");
-  return 1;
+  return rfbClientConfigureAppleHP(client);
 }
 
 static int run_apple_hp_setup(rfbClient *client) {
   if (!g_runtime.apple_hp_mode || !client) return 1;
-
-  rfbClientLog("apple-hp: sending cleartext pre-rekey setup\n");
-  if (!send_viewer_info_blob(client)) return 0;
-  if (!send_native_set_encryption_message(client)) return 0;
-  if (!send_native_set_mode_message(client)) return 0;
-  return 1;
+  return rfbClientRunAppleHPPrelude(client);
 }
 
 static int apple_hp_send_post_rekey_setup(rfbClient *client) {
@@ -1525,20 +1227,19 @@ static int apple_hp_send_post_rekey_setup(rfbClient *client) {
   else
     rfbClientLog("apple-hp: sending post-rekey setup phase %d over CBC transport\n",
                  g_hp.post_rekey_phase + 1);
-  configure_native_post_rekey_pixel_format(client);
+  rfbClientAppleHPSetPostRekeyPixelFormat(client);
   region_w = apple_hp_request_width(client);
   region_h = apple_hp_request_height(client);
   if (g_hp.post_rekey_phase == 0) {
-    if (!send_set_display_message(client)) return 0;
+    if (!rfbClientAppleHPSendSetDisplayMessage(client)) return 0;
     if (!SendCurrentPixelFormat(client)) return 0;
-    if (!send_native_post_auth_encodings(client)) return 0;
     g_hp.post_rekey_phase = 2;
     return 1;
   }
   if (g_hp.post_rekey_phase == 1) g_hp.post_rekey_phase = 2;
 
-  if (!send_auto_pasteboard_command(client, 1)) return 0;
-  if (!send_native_scale_factor_message(client)) return 0;
+  if (!rfbClientAppleHPSendAutoPasteboardCommand(client, 1)) return 0;
+  if (!rfbClientAppleHPSendScaleFactor(client, apple_hp_runtime_scale_factor())) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, region_w, region_h, FALSE)) return 0;
   g_hp.initial_full_refresh_done = 0;
   g_hp.initial_full_refresh_retries = 3;
@@ -1546,7 +1247,7 @@ static int apple_hp_send_post_rekey_setup(rfbClient *client) {
   if (apple_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
   rfbClientLog("apple-hp: requested initial full refresh %ux%u and queued %d retries\n",
                (unsigned)region_w, (unsigned)region_h, g_hp.initial_full_refresh_retries);
-  if (!send_auto_framebuffer_update(client, region_w, region_h)) return 0;
+  if (!rfbClientAppleHPSendAutoFramebufferUpdate(client, region_w, region_h)) return 0;
   g_hp.auto_fbu_active = 1;
   g_hp.post_rekey_phase = 3;
   g_hp.post_rekey_sent = 1;
@@ -1858,6 +1559,61 @@ static int inflate_cursor_payload(const uint8_t *src, uint32_t src_len, uint8_t 
   return 0;
 }
 
+static int apple_hp_dump_cursor_bmp_enabled(void) {
+  return env_flag_enabled("VNC_APPLE_HP_DUMP_CURSOR_BMP");
+}
+
+static void apple_hp_log_cursor_fingerprint(uint32_t cache_id, int width, int height,
+                                            int hot_x, int hot_y, const uint8_t *argb,
+                                            size_t argb_len) {
+  uLong crc = crc32(0L, Z_NULL, 0);
+  size_t i;
+  size_t nonzero_alpha = 0;
+
+  if (!argb || argb_len == 0) return;
+  crc = crc32(crc, argb, (uInt)argb_len);
+  for (i = 0; i + 3 < argb_len; i += 4) {
+    if (argb[i + 3] != 0) ++nonzero_alpha;
+  }
+  (void)cache_id;
+  (void)width;
+  (void)height;
+  (void)hot_x;
+  (void)hot_y;
+  (void)crc;
+  (void)nonzero_alpha;
+}
+
+static void apple_hp_maybe_dump_cursor_bmp(uint32_t cache_id, int width, int height,
+                                           uint8_t *argb) {
+#if defined(APPLEHPDEBUG_HAS_SDL)
+  SDL_Surface *surface;
+  char path[256];
+
+  if (!apple_hp_dump_cursor_bmp_enabled() || !argb || width <= 0 || height <= 0) return;
+  surface = SDL_CreateRGBSurfaceFrom(argb, width, height, 32, width * 4,
+                                     0x0000ff00u, 0x00ff0000u, 0xff000000u, 0x000000ffu);
+  if (!surface) {
+    rfbClientErr("apple-hp: CursorImage dump failed cache=%u: SDL_CreateRGBSurfaceFrom: %s\n",
+                 cache_id, SDL_GetError());
+    return;
+  }
+  snprintf(path, sizeof(path), "/tmp/applehpdebug-cursor-%u.bmp", cache_id);
+  if (SDL_SaveBMP(surface, path) == 0) {
+    rfbClientLog("apple-hp: CursorImage dump cache=%u path=%s\n", cache_id, path);
+  } else {
+    rfbClientErr("apple-hp: CursorImage dump failed cache=%u path=%s err=%s\n",
+                 cache_id, path, SDL_GetError());
+  }
+  SDL_FreeSurface(surface);
+#else
+  (void)cache_id;
+  (void)width;
+  (void)height;
+  (void)argb;
+#endif
+}
+
 static int apple_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int hot_x, int hot_y,
                                        int width, int height, const uint8_t *payload,
                                        uint32_t payload_len) {
@@ -1939,6 +1695,8 @@ static int apple_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int
   entry->hot_y = hot_y;
   entry->width = width;
   entry->height = height;
+  apple_hp_log_cursor_fingerprint(cache_id, width, height, hot_x, hot_y, argb, pixel_count * 4u);
+  apple_hp_maybe_dump_cursor_bmp(cache_id, width, height, argb);
   g_live.cursor_current_cache_id = cache_id;
   g_live.cursor_visible = 1;
   free(packed);
@@ -3156,28 +2914,20 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
 
   if (!client || !rect) return FALSE;
   if ((uint32_t)rect->encoding == 0x44f) {
-    const uint8_t *session_key = NULL;
-    size_t session_key_len = 0;
     if (!ReadFromRFBServer(client, (char *)buf, sizeof(buf))) return FALSE;
 
     g_hp.rekey_seen = 1;
-    if (!rfbClientGetARDSessionKey(client, &session_key, &session_key_len) || session_key_len < 16) {
-      rfbClientErr("apple-hp: no ARD session key available; cannot decrypt 0x44f\n");
+    if (!rfbClientAppleHPDecryptRekeyRecord(client, buf, sizeof(buf), &counter, next_key, next_iv))
       return FALSE;
-    }
-
-    counter = read_be_u32(buf);
-    if (!aes_ecb_decrypt_block(session_key, buf + 4, next_key)) return FALSE;
-    if (!aes_ecb_decrypt_block(session_key, buf + 20, next_iv)) return FALSE;
-    if (!send_post_rekey_set_encryption_stage2(client)) return FALSE;
+    if (!rfbClientAppleHPSendPostRekeySetEncryptionStage2(client)) return FALSE;
     memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
     memcpy(client->ardSessionKey, next_key, 16);
     client->ardSessionKeyLen = 16;
     client->ardSessionKeyReady = TRUE;
     client->suppressNextIncrementalRequest = TRUE;
     if (!apple_hp_enable_transport(client, next_key, next_iv, counter)) return FALSE;
-    if (!send_display_configuration_blob(client)) return FALSE;
-    if (!send_native_post_auth_encodings(client)) return FALSE;
+    if (!rfbClientAppleHPSendInitialDisplayConfiguration(client)) return FALSE;
+    if (!rfbClientAppleHPSendPostAuthEncodings(client)) return FALSE;
     g_hp.post_rekey_ready = 1;
     g_hp.post_rekey_server_records = 0;
     g_hp.post_rekey_phase = 0;
@@ -3185,6 +2935,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   }
 
   if ((uint32_t)rect->encoding == 0x450) {
+    int cursor_changed = 0;
     if (!ReadFromRFBServer(client, (char *)cursor_hdr, sizeof(cursor_hdr))) return FALSE;
     cursor_cache_id = read_be_u32(cursor_hdr);
     cursor_zlib_len = read_be_u32(cursor_hdr + 4);
@@ -3204,17 +2955,20 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       }
       snprintf(label, sizeof(label), "apple-hp rect 0x450 CursorImage payload cache=%u",
                cursor_cache_id);
-      apple_hp_store_cursor_image(client, cursor_cache_id, rect->r.x, rect->r.y,
-                                  rect->r.w, rect->r.h, payload, cursor_zlib_len);
+      cursor_changed = apple_hp_store_cursor_image(client, cursor_cache_id, rect->r.x, rect->r.y,
+                                                   rect->r.w, rect->r.h, payload, cursor_zlib_len);
       free(payload);
     } else {
       if (find_cursor_cache_entry(cursor_cache_id)) {
         g_live.cursor_current_cache_id = cursor_cache_id;
         g_live.cursor_visible = 1;
+        cursor_changed = 1;
       } else {
         g_live.cursor_visible = 0;
+        cursor_changed = 1;
       }
     }
+    if (cursor_changed) redraw_live_view(client);
     return TRUE;
   }
 
@@ -3591,7 +3345,7 @@ static int apple_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint
                                              const char *reason) {
   if (!g_runtime.apple_hp_mode || !client) return 1;
   if (w == 0 || h == 0) return 1;
-  if (g_hp.auto_fbu_active && !send_auto_framebuffer_update(client, w, h)) return 0;
+  if (g_hp.auto_fbu_active && !rfbClientAppleHPSendAutoFramebufferUpdate(client, w, h)) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, w, h, FALSE)) return 0;
   if (apple_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
   rfbClientLog("apple-hp: requested full refresh %ux%u (%s)\n",
@@ -3707,8 +3461,11 @@ int main(int argc, char **argv) {
   }
 
   if (!getenv("VNC_ENCODINGS")) {
-    client->appData.encodingsString =
-        "copyrect tight zrle hextile zlib corre rre raw";
+    if (g_runtime.apple_hp_mode)
+      client->appData.encodingsString = NULL;
+    else
+      client->appData.encodingsString =
+          "copyrect tight zrle hextile zlib corre rre raw";
   } else {
     client->appData.encodingsString = getenv("VNC_ENCODINGS");
   }
@@ -3721,8 +3478,11 @@ int main(int argc, char **argv) {
                client->serverHost ? client->serverHost : "(null)",
                client->serverPort,
                client->desktopName ? client->desktopName : "(null)");
-  rfbClientLog("encodings='%s'\n",
-               client->appData.encodingsString ? client->appData.encodingsString : "(null)");
+  if (g_runtime.apple_hp_mode && !client->appData.encodingsString)
+    rfbClientLog("encodings='(native-apple-hp-post-auth)'\n");
+  else
+    rfbClientLog("encodings='%s'\n",
+                 client->appData.encodingsString ? client->appData.encodingsString : "(null)");
 
   if (!run_apple_hp_setup(client)) {
     rfbClientErr("apple-hp: setup failed\n");

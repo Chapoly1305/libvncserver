@@ -99,6 +99,124 @@ rfbDefaultClientLog(const char *format, ...)
 rfbClientLogProc rfbClientLog=rfbDefaultClientLog;
 rfbClientLogProc rfbClientErr=rfbDefaultClientLog;
 
+static const char *
+rfbClientEncodingName(int32_t encoding)
+{
+  switch (encoding) {
+    case rfbEncodingRaw:
+      return "Raw";
+    case rfbEncodingCopyRect:
+      return "CopyRect";
+    case rfbEncodingRRE:
+      return "RRE";
+    case rfbEncodingCoRRE:
+      return "CoRRE";
+    case rfbEncodingHextile:
+      return "Hextile";
+    case rfbEncodingZlib:
+      return "Zlib";
+    case rfbEncodingTight:
+      return "Tight";
+    case rfbEncodingTightPng:
+      return "TightPng";
+    case rfbEncodingZlibHex:
+      return "ZlibHex";
+    case rfbEncodingUltra:
+      return "Ultra";
+    case rfbEncodingTRLE:
+      return "TRLE";
+    case rfbEncodingZRLE:
+      return "ZRLE";
+    case rfbEncodingZYWRLE:
+      return "ZYWRLE";
+    case rfbEncodingH264:
+      return "H264";
+    case rfbEncodingCache:
+      return "Cache";
+    case rfbEncodingCacheEnable:
+      return "CacheEnable";
+    case rfbEncodingXOR_Zlib:
+      return "XOR_Zlib";
+    case rfbEncodingXORMonoColor_Zlib:
+      return "XORMonoColor_Zlib";
+    case rfbEncodingXORMultiColor_Zlib:
+      return "XORMultiColor_Zlib";
+    case rfbEncodingSolidColor:
+      return "SolidColor";
+    case rfbEncodingXOREnable:
+      return "XOREnable";
+    case rfbEncodingCacheZip:
+      return "CacheZip";
+    case rfbEncodingSolMonoZip:
+      return "SolMonoZip";
+    case rfbEncodingUltraZip:
+      return "UltraZip";
+    case rfbEncodingXvp:
+      return "Xvp";
+    case rfbEncodingXCursor:
+      return "XCursor";
+    case rfbEncodingRichCursor:
+      return "RichCursor";
+    case rfbEncodingPointerPos:
+      return "PointerPos";
+    case rfbEncodingLastRect:
+      return "LastRect";
+    case rfbEncodingNewFBSize:
+      return "NewFBSize";
+    case rfbEncodingExtDesktopSize:
+      return "ExtDesktopSize";
+    case rfbEncodingQemuExtendedKeyEvent:
+      return "QemuExtendedKeyEvent";
+    case rfbEncodingKeyboardLedState:
+      return "KeyboardLedState";
+    case rfbEncodingSupportedMessages:
+      return "SupportedMessages";
+    case rfbEncodingSupportedEncodings:
+      return "SupportedEncodings";
+    case rfbEncodingServerIdentity:
+      return "ServerIdentity";
+    case rfbEncodingExtendedClipboard:
+      return "ExtendedClipboard";
+    case 0x0000044c:
+      return "ApplePointerRebase";
+    case 0x0000044d:
+      return "AppleDisplayLayoutSelector";
+    case 0x00000450:
+      return "AppleCursorImage";
+    case 0x00000451:
+      return "AppleDisplayLayout";
+    case 0x00000453:
+      return "AppleVendorKeysym";
+    case 0x00000455:
+      return "AppleKeyboardInputSource";
+    case 0x00000456:
+      return "AppleDeviceInfo";
+    case 0x000003f2:
+      return "AppleRFBMediaStreamMessage1";
+    default:
+      return "Unknown";
+  }
+}
+
+static void
+rfbClientLogSeenServerEncoding(int32_t encoding)
+{
+  static int32_t seen[256];
+  static size_t seen_count = 0;
+  size_t i;
+
+  for (i = 0; i < seen_count; i++) {
+    if (seen[i] == encoding)
+      return;
+  }
+
+  if (seen_count < (sizeof(seen) / sizeof(seen[0])))
+    seen[seen_count++] = encoding;
+
+  rfbClientLog("server sent rect encoding 0x%08x %d %s\n",
+               (uint32_t)encoding, encoding, rfbClientEncodingName(encoding));
+}
+
 /* extensions */
 
 rfbClientProtocolExtension* rfbClientExtensions = NULL;
@@ -2126,6 +2244,7 @@ HandleRFBServerMessage(rfbClient* client)
 	return FALSE;
 
       rect.encoding = rfbClientSwap32IfLE(rect.encoding);
+      rfbClientLogSeenServerEncoding((int32_t)rect.encoding);
       if (rect.encoding == rfbEncodingLastRect)
 	break;
 
@@ -2236,6 +2355,8 @@ HandleRFBServerMessage(rfbClient* client)
       /* rect.r.w=byte count, rect.r.h=# of encodings */
       if (rect.encoding == rfbEncodingSupportedEncodings) {
           char *buffer;
+          uint32_t *encodings;
+          uint16_t i, count;
           buffer = malloc(rect.r.w);
           if (!ReadFromRFBServer(client, buffer, rect.r.w))
           {
@@ -2244,7 +2365,21 @@ HandleRFBServerMessage(rfbClient* client)
           }
 
           /* buffer now contains rect.r.h # of uint32_t encodings that the server supports */
-          /* currently ignored by this library */
+          count = rect.r.h;
+          if (rect.r.w < count * 4) {
+              rfbClientLog("server advertised malformed SupportedEncodings payload (%u bytes for %u encodings)\n",
+                           rect.r.w, count);
+              free(buffer);
+              return FALSE;
+          }
+
+          rfbClientLog("server supported encodings (%u)\n", count);
+          encodings = (uint32_t *)buffer;
+          for (i = 0; i < count; i++) {
+              int32_t enc = (int32_t)rfbClientSwap32IfLE(encodings[i]);
+              rfbClientLog("  [%u] 0x%08x %d %s\n",
+                           i, (uint32_t)enc, enc, rfbClientEncodingName(enc));
+          }
           free(buffer);
           continue;
       }
