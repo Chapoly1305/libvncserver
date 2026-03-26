@@ -14,8 +14,8 @@
 #include "ardhp_protocol.h"
 
 static const int32_t kARDHPNativePostAuthEncodings[] = {
-    0x6,
     0x10,
+    0x6,
     (int32_t)0xffffff11u,
     ARD_HP_ENCODING_CURSOR_IMAGE,
     ARD_HP_ENCODING_POINTER_REBASE,
@@ -34,12 +34,22 @@ struct ard_hp_transport_state {
   uint8_t cbc_key[16];
   uint8_t send_iv[16];
   uint8_t recv_iv[16];
+  CCCryptorRef send_cryptor;
+  CCCryptorRef recv_cryptor;
   uint32_t send_seq;
   uint32_t recv_seq;
   uint8_t *recv_buf;
   size_t recv_len;
   size_t recv_off;
   size_t recv_cap;
+  uint8_t *wire_buf;
+  size_t wire_cap;
+  size_t wire_len;
+  size_t wire_off;
+  uint8_t *send_plain_buf;
+  uint8_t *send_cipher_buf;
+  size_t send_plain_cap;
+  size_t send_cipher_cap;
 };
 
 struct ard_hp_client_state {
@@ -107,6 +117,7 @@ static const char *ard_hp_encoding_name(int32_t encoding) {
     case 0x00000010u: return "ZRLE";
     case 0xffffff11u: return "RichCursor";
     case 0xffffff21u: return "NewFBSize";
+    case 0x0000044fu: return "ARDSetEncryptionMessage";
     case 0x0000044cu: return "ARDPointerRebase";
     case 0x0000044du: return "ARDDisplayLayoutSelector";
     case 0x00000450u: return "ARDCursorImage";
@@ -184,6 +195,39 @@ static int raw_read_exact(rfbClient *client, void *out, size_t len) {
   return 1;
 }
 
+static int raw_read_some(rfbClient *client, void *out, size_t len, size_t *read_len) {
+  ssize_t n;
+
+  if (read_len) *read_len = 0;
+  if (!client || !out || len == 0) return 0;
+
+  if (client->buffered > 0) {
+    size_t take = client->buffered < len ? client->buffered : len;
+    memcpy(out, client->bufoutptr, take);
+    client->bufoutptr += take;
+    client->buffered -= take;
+    if (read_len) *read_len = take;
+    return 1;
+  }
+
+  for (;;) {
+    n = read(client->sock, out, len);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      if ((errno == EAGAIN || errno == EWOULDBLOCK) && wait_for_socket_io(client->sock, 0))
+        continue;
+      rfbClientErr("ard-hp transport: read failed (%d: %s)\n", errno, strerror(errno));
+      return 0;
+    }
+    if (n == 0) {
+      rfbClientLog("ard-hp transport: server closed connection\n");
+      return 0;
+    }
+    if (read_len) *read_len = (size_t)n;
+    return 1;
+  }
+}
+
 static int raw_write_exact(rfbClient *client, const void *buf, size_t len) {
   const uint8_t *p = (const uint8_t *)buf;
 
@@ -203,6 +247,70 @@ static int raw_write_exact(rfbClient *client, const void *buf, size_t len) {
     p += (size_t)n;
     len -= (size_t)n;
   }
+  return 1;
+}
+
+static void ard_hp_release_cryptor(CCCryptorRef *cryptor) {
+  if (!cryptor || !*cryptor) return;
+  CCCryptorRelease(*cryptor);
+  *cryptor = NULL;
+}
+
+static int ard_hp_prepare_cbc_cryptor(CCCryptorRef *cryptor,
+                                      CCOperation op,
+                                      const uint8_t *key,
+                                      const uint8_t *iv) {
+  CCCryptorStatus st;
+
+  if (!cryptor || !key || !iv) return 0;
+  if (!*cryptor) {
+    st = CCCryptorCreateWithMode(op,
+                                 kCCModeCBC,
+                                 kCCAlgorithmAES,
+                                 ccNoPadding,
+                                 iv,
+                                 key,
+                                 16,
+                                 NULL,
+                                 0,
+                                 0,
+                                 0,
+                                 cryptor);
+    if (st != kCCSuccess) {
+      rfbClientErr("ard-hp transport: CCCryptorCreateWithMode failed status=%d\n",
+                   (int)st);
+      *cryptor = NULL;
+      return 0;
+    }
+    return 1;
+  }
+  st = CCCryptorReset(*cryptor, iv);
+  if (st != kCCSuccess) {
+    rfbClientErr("ard-hp transport: CCCryptorReset failed status=%d\n", (int)st);
+    return 0;
+  }
+  return 1;
+}
+
+static int ard_hp_cbc_crypt(CCCryptorRef *cryptor,
+                            CCOperation op,
+                            const uint8_t *key,
+                            const uint8_t *iv,
+                            const uint8_t *in,
+                            size_t in_len,
+                            uint8_t *out,
+                            size_t *out_len) {
+  CCCryptorStatus st;
+  size_t moved = 0;
+
+  if (!ard_hp_prepare_cbc_cryptor(cryptor, op, key, iv)) return 0;
+  st = CCCryptorUpdate(*cryptor, in, in_len, out, in_len, &moved);
+  if (st != kCCSuccess || moved != in_len) {
+    rfbClientErr("ard-hp transport: CCCryptorUpdate failed status=%d moved=%zu expected=%zu\n",
+                 (int)st, moved, in_len);
+    return 0;
+  }
+  if (out_len) *out_len = moved;
   return 1;
 }
 
@@ -234,6 +342,69 @@ static uint16_t ard_hp_read_be_u16(const uint8_t *p) {
 static uint32_t ard_hp_read_be_u32(const uint8_t *p) {
   return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
          (uint32_t)p[3];
+}
+
+static int ard_hp_ensure_buf(uint8_t **buf, size_t *cap, size_t need) {
+  uint8_t *next;
+
+  if (!buf || !cap) return 0;
+  if (*cap >= need) return 1;
+  next = (uint8_t *)realloc(*buf, need);
+  if (!next) return 0;
+  *buf = next;
+  *cap = need;
+  return 1;
+}
+
+static int ard_hp_fill_wire(rfbClient *client, struct ard_hp_transport_state *st, size_t need) {
+  size_t avail;
+
+  if (!client || !st) return 0;
+
+  avail = st->wire_len - st->wire_off;
+  if (avail >= need) return 1;
+
+  if (avail > 0 && st->wire_off > 0) {
+    memmove(st->wire_buf, st->wire_buf + st->wire_off, avail);
+    st->wire_len = avail;
+    st->wire_off = 0;
+  } else if (avail == 0) {
+    st->wire_len = 0;
+    st->wire_off = 0;
+  }
+
+  if (!ard_hp_ensure_buf(&st->wire_buf, &st->wire_cap, need > 65536 ? need : 65536)) {
+    return 0;
+  }
+
+  while ((st->wire_len - st->wire_off) < need) {
+    size_t got = 0;
+    size_t free_space = st->wire_cap - st->wire_len;
+    size_t want = need - (st->wire_len - st->wire_off);
+
+    if (free_space < want) {
+      size_t target = st->wire_cap ? st->wire_cap : 65536;
+      while ((target - st->wire_len) < want) {
+        size_t next = target * 2;
+        if (next <= target) {
+          target = st->wire_len + want;
+          break;
+        }
+        target = next;
+      }
+      if (!ard_hp_ensure_buf(&st->wire_buf, &st->wire_cap, target)) {
+        return 0;
+      }
+      free_space = st->wire_cap - st->wire_len;
+    }
+
+    if (!raw_read_some(client, st->wire_buf + st->wire_len, free_space, &got)) {
+      return 0;
+    }
+    st->wire_len += got;
+  }
+
+  return 1;
 }
 
 static int send_blob(rfbClient *client, const void *buf, size_t len, const char *label) {
@@ -301,9 +472,7 @@ static void patch_display_configuration_dimensions(struct ard_hp_display_configu
 
 static int ard_hp_read_next_record(rfbClient *client, struct ard_hp_transport_state *st) {
   struct ard_hp_client_state *state = ard_hp_state(client);
-  uint8_t hdr[2];
-  uint8_t *cipher = NULL;
-  uint8_t *plain = NULL;
+  const uint8_t *cipher;
   uint16_t cipher_len;
   uint16_t body_len;
   uint8_t seq_be[4];
@@ -311,19 +480,25 @@ static int ard_hp_read_next_record(rfbClient *client, struct ard_hp_transport_st
   size_t moved = 0;
   size_t total_min;
 
-  if (!raw_read_exact(client, hdr, sizeof(hdr))) return 0;
-  cipher_len = ard_hp_read_be_u16(hdr);
+  if (!ard_hp_fill_wire(client, st, 2u)) return 0;
+  cipher_len = ard_hp_read_be_u16(st->wire_buf + st->wire_off);
   if (cipher_len == 0 || (cipher_len % 16) != 0) {
     rfbClientErr("ard-hp transport: invalid record length %u\n", (unsigned)cipher_len);
     return 0;
   }
-  cipher = (uint8_t *)malloc(cipher_len);
-  plain = (uint8_t *)malloc(cipher_len);
-  if (!cipher || !plain) goto fail;
-  if (!raw_read_exact(client, cipher, cipher_len)) goto fail;
-  if (!aes_crypt(kCCDecrypt, 0, st->cbc_key, st->recv_iv, cipher, cipher_len, plain, &moved)) goto fail;
+  if (!ard_hp_fill_wire(client, st, (size_t)cipher_len + 2u)) goto fail;
+  if (!ard_hp_ensure_buf(&st->recv_buf, &st->recv_cap, cipher_len)) goto fail;
+  cipher = st->wire_buf + st->wire_off + 2u;
+  if (!ard_hp_cbc_crypt(&st->recv_cryptor,
+                        kCCDecrypt,
+                        st->cbc_key,
+                        st->recv_iv,
+                        cipher,
+                        cipher_len,
+                        st->recv_buf,
+                        &moved)) goto fail;
   if (moved != cipher_len || cipher_len < 22) goto fail;
-  body_len = ard_hp_read_be_u16(plain);
+  body_len = ard_hp_read_be_u16(st->recv_buf);
   total_min = (size_t)body_len + 22u;
   if (total_min > cipher_len) {
     rfbClientErr("ard-hp transport: body len %u exceeds record size %u\n",
@@ -335,33 +510,29 @@ static int ard_hp_read_next_record(rfbClient *client, struct ard_hp_transport_st
     CC_SHA1_CTX ctx;
     CC_SHA1_Init(&ctx);
     CC_SHA1_Update(&ctx, seq_be, sizeof(seq_be));
-    CC_SHA1_Update(&ctx, plain, cipher_len - CC_SHA1_DIGEST_LENGTH);
+    CC_SHA1_Update(&ctx, st->recv_buf, cipher_len - CC_SHA1_DIGEST_LENGTH);
     CC_SHA1_Final(digest, &ctx);
   }
-  if (memcmp(digest, plain + cipher_len - CC_SHA1_DIGEST_LENGTH, CC_SHA1_DIGEST_LENGTH) != 0) {
+  if (memcmp(digest,
+             st->recv_buf + cipher_len - CC_SHA1_DIGEST_LENGTH,
+             CC_SHA1_DIGEST_LENGTH) != 0) {
     rfbClientErr("ard-hp transport: checksum mismatch seq=%u cipher_len=%u body_len=%u\n",
                  st->recv_seq, (unsigned)cipher_len, (unsigned)body_len);
     goto fail;
   }
   st->recv_seq++;
   if (state) state->recv_records++;
-  if (body_len > st->recv_cap) {
-    uint8_t *next = (uint8_t *)realloc(st->recv_buf, body_len);
-    if (!next) goto fail;
-    st->recv_buf = next;
-    st->recv_cap = body_len;
-  }
-  memcpy(st->recv_buf, plain + 2, body_len);
-  st->recv_len = body_len;
-  st->recv_off = 0;
+  st->recv_len = (size_t)body_len + 2u;
+  st->recv_off = 2;
   memcpy(st->recv_iv, cipher + cipher_len - 16, 16);
-  free(cipher);
-  free(plain);
+  st->wire_off += (size_t)cipher_len + 2u;
+  if (st->wire_off == st->wire_len) {
+    st->wire_off = 0;
+    st->wire_len = 0;
+  }
   return 1;
 
 fail:
-  free(cipher);
-  free(plain);
   return 0;
 }
 
@@ -404,9 +575,11 @@ static rfbBool ard_hp_transport_write(rfbClient *client, const char *buf, unsign
   if (!state || !buf) return FALSE;
   st = &state->transport;
   plain_len = ((size_t)n + 22u + 15u) & ~((size_t)15u);
-  plain = (uint8_t *)calloc(1, plain_len);
-  cipher = (uint8_t *)malloc(plain_len);
-  if (!plain || !cipher) goto fail;
+  if (!ard_hp_ensure_buf(&st->send_plain_buf, &st->send_plain_cap, plain_len)) goto fail;
+  if (!ard_hp_ensure_buf(&st->send_cipher_buf, &st->send_cipher_cap, plain_len)) goto fail;
+  plain = st->send_plain_buf;
+  cipher = st->send_cipher_buf;
+  memset(plain, 0, plain_len);
 
   ard_hp_store_be16(plain, (uint16_t)n);
   memcpy(plain + 2, buf, n);
@@ -420,19 +593,22 @@ static rfbBool ard_hp_transport_write(rfbClient *client, const char *buf, unsign
     CC_SHA1_Update(&ctx, plain, plain_len - CC_SHA1_DIGEST_LENGTH);
     CC_SHA1_Final(plain + plain_len - CC_SHA1_DIGEST_LENGTH, &ctx);
   }
-  if (!aes_crypt(kCCEncrypt, 0, st->cbc_key, st->send_iv, plain, plain_len, cipher, &moved)) goto fail;
+  if (!ard_hp_cbc_crypt(&st->send_cryptor,
+                        kCCEncrypt,
+                        st->cbc_key,
+                        st->send_iv,
+                        plain,
+                        plain_len,
+                        cipher,
+                        &moved)) goto fail;
   ard_hp_store_be16(hdr, (uint16_t)moved);
   if (!raw_write_exact(client, hdr, sizeof(hdr))) goto fail;
   if (!raw_write_exact(client, cipher, moved)) goto fail;
   memcpy(st->send_iv, cipher + moved - 16, 16);
   st->send_seq++;
-  free(plain);
-  free(cipher);
   return TRUE;
 
 fail:
-  free(plain);
-  free(cipher);
   return FALSE;
 }
 
@@ -442,7 +618,12 @@ void rfbClientCleanupARDHP(rfbClient *client) {
   if (!client) return;
   state = (struct ard_hp_client_state *)rfbClientGetClientData(client, &kARDHPClientDataTag);
   if (!state) return;
+  ard_hp_release_cryptor(&state->transport.send_cryptor);
+  ard_hp_release_cryptor(&state->transport.recv_cryptor);
   free(state->transport.recv_buf);
+  free(state->transport.wire_buf);
+  free(state->transport.send_plain_buf);
+  free(state->transport.send_cipher_buf);
   free(state);
   rfbClientSetClientData(client, &kARDHPClientDataTag, NULL);
 }
@@ -487,6 +668,8 @@ rfbBool rfbClientARDHPEnableTransport(rfbClient *client, const uint8_t *next_key
 
   if (!state || !client || !next_key || !next_iv) return FALSE;
   st = &state->transport;
+  ard_hp_release_cryptor(&st->send_cryptor);
+  ard_hp_release_cryptor(&st->recv_cryptor);
   memset(st, 0, sizeof(*st));
   memcpy(st->wrap_key, next_key, 16);
   memcpy(st->cbc_key, next_key, 16);
@@ -605,6 +788,8 @@ rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client) {
                  kARDHPProModeEncoding);
   }
   for (i = 0; i < sizeof(kARDHPNativePostAuthEncodings) / sizeof(kARDHPNativePostAuthEncodings[0]); ++i) {
+    if (ard_hp_env_flag_enabled("VNC_DISABLE_ZLIB") && kARDHPNativePostAuthEncodings[i] == 0x6)
+      continue;
     if (omit_44c && kARDHPNativePostAuthEncodings[i] == ARD_HP_ENCODING_POINTER_REBASE)
       continue;
     if (omit_44d && kARDHPNativePostAuthEncodings[i] == ARD_HP_ENCODING_DISPLAY_LAYOUT_SELECTOR)

@@ -258,6 +258,8 @@ typedef char* (*GetUserProc)(struct _rfbClient* client);
 typedef char* (*GetSASLMechanismProc)(struct _rfbClient* client, char* mechlist);
 #endif /* LIBVNCSERVER_HAVE_SASL */
 
+void rfbClientDefaultGotBitmap(struct _rfbClient* client, const uint8_t* buffer, int x, int y, int w, int h);
+
 typedef struct _rfbClient {
 	uint8_t* frameBuffer;
 	int width, height;
@@ -524,6 +526,18 @@ typedef struct _rfbClient {
 	char *ardAuthRealm;
 	char *ardAuthClientPrincipal;
 	char *ardAuthServicePrincipal;
+
+	/** Lightweight live performance counters for clients that want to surface
+	 * update rate/pacing information without external profiling. */
+	uint64_t perf_rect_total;
+	uint64_t perf_rect_zlib;
+	uint64_t perf_rect_zrle;
+	uint64_t perf_present_total;
+	uint64_t perf_last_rect_pixels;
+	int32_t perf_last_rect_encoding;
+	uint64_t perf_last_rect_us;
+	uint64_t perf_last_present_us;
+	uint64_t perf_last_rect_to_present_us;
 } rfbClient;
 
 /* cursor.c */

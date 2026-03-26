@@ -31,6 +31,68 @@
 
 #define HandleZlibBPP CONCAT2E(HandleZlib,BPP)
 #define CARDBPP CONCAT3E(uint,BPP,_t)
+#define EnsureRawBufferBPP CONCAT2E(EnsureRawBuffer,BPP)
+#define CanDirectDecodeBPP CONCAT2E(CanDirectDecode,BPP)
+
+static rfbBool
+EnsureRawBufferBPP(rfbClient* client, size_t need)
+{
+  size_t cap;
+  char *buf;
+
+  if (client->raw_buffer != NULL &&
+      client->raw_buffer_size > 0 &&
+      (size_t)client->raw_buffer_size >= need) {
+    return TRUE;
+  }
+
+  cap = (client->raw_buffer_size > 0) ? (size_t)client->raw_buffer_size : 0;
+  if (cap < 65536) {
+    cap = 65536;
+  }
+  while (cap < need) {
+    size_t next = cap * 2;
+    if (next <= cap) {
+      cap = need;
+      break;
+    }
+    cap = next;
+  }
+
+  buf = (char *)realloc(client->raw_buffer, cap);
+  if (buf == NULL) {
+    rfbClientLog("zlib raw buffer allocation failed for %lu bytes\n",
+                 (unsigned long)cap);
+    return FALSE;
+  }
+
+  client->raw_buffer = buf;
+  client->raw_buffer_size = (int)cap;
+  return TRUE;
+}
+
+static rfbBool
+CanDirectDecodeBPP(rfbClient* client, int rx, int ry, int rw, int rh,
+                   Bytef **dst_out, size_t *row_bytes_out, size_t *stride_bytes_out)
+{
+  size_t offset;
+
+  if (client->GotBitmap != rfbClientDefaultGotBitmap ||
+      client->frameBuffer == NULL ||
+      rx != 0 ||
+      rw != client->width ||
+      ry < 0 ||
+      rh <= 0 ||
+      ry + rh > client->height) {
+    return FALSE;
+  }
+
+  *stride_bytes_out = (size_t)client->width * (size_t)(BPP / 8);
+  *row_bytes_out = (size_t)rw * (size_t)(BPP / 8);
+  offset = (size_t)ry * (*stride_bytes_out) + (size_t)rx * (size_t)(BPP / 8);
+  *dst_out = (Bytef *)(client->frameBuffer + offset);
+  return TRUE;
+}
 
 static rfbBool
 HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
@@ -39,6 +101,11 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
   int remaining;
   int inflateResult;
   int toRead;
+  size_t raw_size;
+  size_t direct_row_bytes;
+  size_t direct_stride_bytes;
+  Bytef *dst;
+  rfbBool direct_decode;
 
   /* First make sure we have a large enough raw buffer to hold the
    * decompressed data.  In practice, with a fixed BPP, fixed frame
@@ -46,17 +113,16 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
    * buffer, this buffer allocation should only happen once, on the
    * first update.
    */
-  if ( client->raw_buffer_size < (( rw * rh ) * ( BPP / 8 ))) {
-
-    if ( client->raw_buffer != NULL ) {
-
-      free( client->raw_buffer );
-
+  raw_size = (size_t)rw * (size_t)rh * (size_t)(BPP / 8);
+  direct_decode = CanDirectDecodeBPP(client, rx, ry, rw, rh, &dst,
+                                     &direct_row_bytes, &direct_stride_bytes);
+  if (!direct_decode) {
+    if (!EnsureRawBufferBPP(client, raw_size)) {
+      return FALSE;
     }
-
-    client->raw_buffer_size = (( rw * rh ) * ( BPP / 8 ));
-    client->raw_buffer = (char*) malloc( client->raw_buffer_size );
-
+    dst = (Bytef *)client->raw_buffer;
+    direct_row_bytes = raw_size;
+    direct_stride_bytes = raw_size;
   }
 
   if (!ReadFromRFBServer(client, (char *)&hdr, sz_rfbZlibHeader))
@@ -67,8 +133,8 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
   /* Need to initialize the decompressor state. */
   client->decompStream.next_in   = ( Bytef * )client->buffer;
   client->decompStream.avail_in  = 0;
-  client->decompStream.next_out  = ( Bytef * )client->raw_buffer;
-  client->decompStream.avail_out = client->raw_buffer_size;
+  client->decompStream.next_out  = dst;
+  client->decompStream.avail_out = direct_decode ? direct_row_bytes : client->raw_buffer_size;
   client->decompStream.data_type = Z_BINARY;
 
   /* Initialize the decompression stream structures on the first invocation. */
@@ -142,7 +208,9 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
   if ( inflateResult == Z_OK ) {
 
     /* Put the uncompressed contents of the update on the screen. */
-    client->GotBitmap(client, (uint8_t *)client->raw_buffer, rx, ry, rw, rh);
+    if (!direct_decode) {
+      client->GotBitmap(client, (uint8_t *)client->raw_buffer, rx, ry, rw, rh);
+    }
   }
   else {
 
@@ -158,5 +226,7 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
 }
 
 #undef CARDBPP
+#undef EnsureRawBufferBPP
+#undef CanDirectDecodeBPP
 
 #endif

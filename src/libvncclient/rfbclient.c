@@ -74,6 +74,34 @@
 
 rfbBool rfbEnableClientLogging=TRUE;
 
+static uint64_t
+rfbClientMonotonicUs(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
+}
+
+static void
+rfbClientRecordRectStats(rfbClient *client, int32_t encoding, uint16_t w, uint16_t h)
+{
+    if (!client)
+        return;
+
+    client->perf_rect_total++;
+    if (encoding == rfbEncodingZlib)
+        client->perf_rect_zlib++;
+    else if (encoding == rfbEncodingZRLE)
+        client->perf_rect_zrle++;
+
+    client->perf_last_rect_encoding = encoding;
+    client->perf_last_rect_pixels = (uint64_t)w * (uint64_t)h;
+    client->perf_last_rect_us = rfbClientMonotonicUs();
+}
+
 static void
 rfbDefaultClientLog(const char *format, ...)
 {
@@ -177,6 +205,8 @@ rfbClientEncodingName(int32_t encoding)
       return "ServerIdentity";
     case rfbEncodingExtendedClipboard:
       return "ExtendedClipboard";
+    case 0x0000044f:
+      return "ARDSetEncryptionMessage";
     case 0x0000044c:
       return "ARDPointerRebase";
     case 0x0000044d:
@@ -2719,6 +2749,7 @@ HandleRFBServerMessage(rfbClient* client)
       /* Now we may discard "soft cursor locks". */
       client->SoftCursorUnlockScreen(client);
 
+      rfbClientRecordRectStats(client, rect.encoding, rect.r.w, rect.r.h);
       client->GotFrameBufferUpdate(client, rect.r.x, rect.r.y, rect.r.w, rect.r.h);
     }
 

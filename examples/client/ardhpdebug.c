@@ -215,6 +215,7 @@ static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_v
 static void maybe_log_live_view_layers(rfbClient *client, const struct ard_hp_live_view_geometry *geom);
 static void maybe_note_live_view_geometry_intent(rfbClient *client,
                                                  const struct ard_hp_live_view_geometry *geom);
+static void draw_live_view_perf_overlay(rfbClient *client, int panel_x, int panel_y);
 static void queue_live_view_present(int x, int y, int w, int h);
 static void refresh_live_view_layout(rfbClient *client);
 static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
@@ -411,21 +412,83 @@ static int maybe_present_live_view_if_due(rfbClient *client, int force) {
   return 1;
 }
 
+static int update_live_view_texture_rect(rfbClient *client, const SDL_Rect *rect) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  SDL_Surface *sdl = NULL;
+  void *dst_pixels = NULL;
+  int dst_pitch = 0;
+  const uint8_t *src_row = NULL;
+  uint8_t *dst_row = NULL;
+  int row = 0;
+  int copy_bytes = 0;
+
+  if (!client || !rect || !g_live.texture) return 0;
+  sdl = (SDL_Surface *)rfbClientGetClientData(client, SDL_Init);
+  if (!sdl) return 0;
+  if (SDL_LockTexture(g_live.texture, rect, &dst_pixels, &dst_pitch) < 0) {
+    rfbClientErr("live-view: SDL_LockTexture failed: %s\n", SDL_GetError());
+    return 0;
+  }
+  src_row = (const uint8_t *)sdl->pixels +
+            rect->y * sdl->pitch +
+            rect->x * 4;
+  dst_row = (uint8_t *)dst_pixels;
+  copy_bytes = rect->w * 4;
+  for (row = 0; row < rect->h; ++row) {
+    memcpy(dst_row, src_row, (size_t)copy_bytes);
+    dst_row += dst_pitch;
+    src_row += sdl->pitch;
+  }
+  SDL_UnlockTexture(g_live.texture);
+  return 1;
+#else
+  (void)client;
+  (void)rect;
+  return 0;
+#endif
+}
+
 static void note_live_view_input(void) {
   g_live.last_input_us = monotonic_us();
 }
 
 static const uint8_t *overlay_glyph_rows(char ch) {
+  if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
   switch (ch) {
+    case '0': { static const uint8_t rows[] = {0x7, 0x5, 0x5, 0x5, 0x7}; return rows; }
+    case '1': { static const uint8_t rows[] = {0x2, 0x6, 0x2, 0x2, 0x7}; return rows; }
+    case '2': { static const uint8_t rows[] = {0x7, 0x1, 0x7, 0x4, 0x7}; return rows; }
+    case '3': { static const uint8_t rows[] = {0x7, 0x1, 0x7, 0x1, 0x7}; return rows; }
+    case '4': { static const uint8_t rows[] = {0x5, 0x5, 0x7, 0x1, 0x1}; return rows; }
+    case '5': { static const uint8_t rows[] = {0x7, 0x4, 0x7, 0x1, 0x7}; return rows; }
+    case '6': { static const uint8_t rows[] = {0x7, 0x4, 0x7, 0x5, 0x7}; return rows; }
+    case '7': { static const uint8_t rows[] = {0x7, 0x1, 0x1, 0x1, 0x1}; return rows; }
+    case '8': { static const uint8_t rows[] = {0x7, 0x5, 0x7, 0x5, 0x7}; return rows; }
+    case '9': { static const uint8_t rows[] = {0x7, 0x5, 0x7, 0x1, 0x7}; return rows; }
+    case '.': { static const uint8_t rows[] = {0x0, 0x0, 0x0, 0x0, 0x2}; return rows; }
+    case '/': { static const uint8_t rows[] = {0x1, 0x1, 0x2, 0x4, 0x4}; return rows; }
+    case ' ': { static const uint8_t rows[] = {0x0, 0x0, 0x0, 0x0, 0x0}; return rows; }
+    case 'A': { static const uint8_t rows[] = {0x2, 0x5, 0x7, 0x5, 0x5}; return rows; }
     case 'B': { static const uint8_t rows[] = {0x6, 0x5, 0x6, 0x5, 0x6}; return rows; }
     case 'C': { static const uint8_t rows[] = {0x7, 0x4, 0x4, 0x4, 0x7}; return rows; }
     case 'D': { static const uint8_t rows[] = {0x6, 0x5, 0x5, 0x5, 0x6}; return rows; }
+    case 'E': { static const uint8_t rows[] = {0x7, 0x4, 0x6, 0x4, 0x7}; return rows; }
     case 'F': { static const uint8_t rows[] = {0x7, 0x4, 0x6, 0x4, 0x4}; return rows; }
+    case 'G': { static const uint8_t rows[] = {0x7, 0x4, 0x5, 0x5, 0x7}; return rows; }
+    case 'I': { static const uint8_t rows[] = {0x7, 0x2, 0x2, 0x2, 0x7}; return rows; }
+    case 'J': { static const uint8_t rows[] = {0x7, 0x1, 0x1, 0x5, 0x7}; return rows; }
+    case 'L': { static const uint8_t rows[] = {0x4, 0x4, 0x4, 0x4, 0x7}; return rows; }
+    case 'M': { static const uint8_t rows[] = {0x5, 0x7, 0x7, 0x5, 0x5}; return rows; }
     case 'O': { static const uint8_t rows[] = {0x7, 0x5, 0x5, 0x5, 0x7}; return rows; }
+    case 'P': { static const uint8_t rows[] = {0x7, 0x5, 0x7, 0x4, 0x4}; return rows; }
     case 'R': { static const uint8_t rows[] = {0x6, 0x5, 0x6, 0x5, 0x5}; return rows; }
     case 'S': { static const uint8_t rows[] = {0x7, 0x4, 0x7, 0x1, 0x7}; return rows; }
     case 'T': { static const uint8_t rows[] = {0x7, 0x2, 0x2, 0x2, 0x2}; return rows; }
     case 'U': { static const uint8_t rows[] = {0x5, 0x5, 0x5, 0x5, 0x7}; return rows; }
+    case 'V': { static const uint8_t rows[] = {0x5, 0x5, 0x5, 0x5, 0x2}; return rows; }
+    case 'W': { static const uint8_t rows[] = {0x5, 0x5, 0x7, 0x7, 0x5}; return rows; }
+    case 'X': { static const uint8_t rows[] = {0x5, 0x5, 0x2, 0x5, 0x5}; return rows; }
+    case 'Z': { static const uint8_t rows[] = {0x7, 0x1, 0x2, 0x4, 0x7}; return rows; }
     default: break;
   }
   return NULL;
@@ -433,33 +496,30 @@ static const uint8_t *overlay_glyph_rows(char ch) {
 
 static void draw_overlay_text(SDL_Renderer *renderer, int x, int y, const char *text,
                               uint8_t r, uint8_t g, uint8_t b) {
+  const int scale = 6;
+  const int advance = 22;
   int cursor_x = x;
 
   if (!renderer || !text) return;
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
-  {
-    SDL_Rect bg = {x - 2, y - 2, (int)strlen(text) * 8 + 2, 9};
-    SDL_RenderFillRect(renderer, &bg);
-  }
   SDL_SetRenderDrawColor(renderer, r, g, b, 255);
   for (; *text; ++text) {
     const uint8_t *rows = overlay_glyph_rows(*text);
     int row;
     if (!rows) {
-      cursor_x += 8;
+      cursor_x += advance;
       continue;
     }
     for (row = 0; row < 5; ++row) {
       int col;
       for (col = 0; col < 3; ++col) {
         if ((rows[row] >> (2 - col)) & 1u) {
-          SDL_Rect px = {cursor_x + col * 2, y + row * 2, 2, 2};
+          SDL_Rect px = {cursor_x + col * scale, y + row * scale, scale, scale};
           SDL_RenderFillRect(renderer, &px);
         }
       }
     }
-    cursor_x += 8;
+    cursor_x += advance;
   }
 }
 
@@ -481,6 +541,180 @@ static void draw_overlay_box(SDL_Renderer *renderer, const SDL_Rect *rect,
   SDL_SetRenderDrawColor(renderer, r, g, b, 255);
   SDL_RenderDrawRect(renderer, rect);
   if (label) draw_overlay_text(renderer, rect->x + 4, rect->y + 4, label, r, g, b);
+}
+
+static const char *live_view_perf_encoding_label(int32_t encoding) {
+  switch (encoding) {
+    case rfbEncodingZlib:
+      return "zlib";
+    case rfbEncodingZRLE:
+      return "zrle";
+    case rfbEncodingRaw:
+      return "raw";
+    default:
+      return "other";
+  }
+}
+
+static void draw_live_view_perf_overlay(rfbClient *client, int panel_x, int panel_y) {
+  enum { PERF_HISTORY = 50 };
+  static long long last_sample_ms = 0;
+  static uint64_t last_rect_total = 0;
+  static uint64_t last_rect_zlib = 0;
+  static uint64_t last_rect_zrle = 0;
+  static uint64_t last_present_total = 0;
+  static double rect_hist[PERF_HISTORY] = {0};
+  static double present_hist[PERF_HISTORY] = {0};
+  static double zlib_hist[PERF_HISTORY] = {0};
+  static double zrle_hist[PERF_HISTORY] = {0};
+  static double lag_hist[PERF_HISTORY] = {0};
+  static int hist_count = 0;
+  static int hist_head = 0;
+  static double rect_rate = 0.0;
+  static double zlib_rate = 0.0;
+  static double zrle_rate = 0.0;
+  static double present_rate = 0.0;
+  static double lag_ms = 0.0;
+  static double avg_lag_ms = 0.0;
+  static double max_lag_ms = 0.0;
+  static double jitter_ms = 0.0;
+  char line[96];
+  SDL_Rect rates_rect;
+  SDL_Rect lag_rect;
+  long long now_ms;
+  long long elapsed_ms;
+  double seconds;
+  double max_rate;
+  double max_lag;
+  double lag_sum;
+  double lag_delta_sum;
+  int i;
+
+  if (!client || !g_live.renderer) return;
+
+  rates_rect.x = panel_x;
+  rates_rect.y = panel_y + 112;
+  rates_rect.w = 420;
+  rates_rect.h = 88;
+  lag_rect.x = panel_x;
+  lag_rect.y = panel_y + 212;
+  lag_rect.w = 420;
+  lag_rect.h = 54;
+
+
+  now_ms = monotonic_ms();
+  if (last_sample_ms <= 0) {
+    last_sample_ms = now_ms;
+    last_rect_total = client->perf_rect_total;
+    last_rect_zlib = client->perf_rect_zlib;
+    last_rect_zrle = client->perf_rect_zrle;
+    last_present_total = client->perf_present_total;
+  } else {
+    elapsed_ms = now_ms - last_sample_ms;
+    if (elapsed_ms >= 200) {
+      seconds = (double)elapsed_ms / 1000.0;
+      rect_rate = (double)(client->perf_rect_total - last_rect_total) / seconds;
+      zlib_rate = (double)(client->perf_rect_zlib - last_rect_zlib) / seconds;
+      zrle_rate = (double)(client->perf_rect_zrle - last_rect_zrle) / seconds;
+      present_rate = (double)(client->perf_present_total - last_present_total) / seconds;
+      lag_ms = (double)client->perf_last_rect_to_present_us / 1000.0;
+      rect_hist[hist_head] = rect_rate;
+      present_hist[hist_head] = present_rate;
+      zlib_hist[hist_head] = zlib_rate;
+      zrle_hist[hist_head] = zrle_rate;
+      lag_hist[hist_head] = lag_ms;
+      hist_head = (hist_head + 1) % PERF_HISTORY;
+      if (hist_count < PERF_HISTORY) hist_count++;
+      last_sample_ms = now_ms;
+      last_rect_total = client->perf_rect_total;
+      last_rect_zlib = client->perf_rect_zlib;
+      last_rect_zrle = client->perf_rect_zrle;
+      last_present_total = client->perf_present_total;
+    }
+  }
+
+  lag_sum = 0.0;
+  lag_delta_sum = 0.0;
+  max_lag_ms = 0.0;
+  for (i = 0; i < hist_count; ++i) {
+    int idx = (hist_head - hist_count + i + PERF_HISTORY) % PERF_HISTORY;
+    lag_sum += lag_hist[idx];
+    if (lag_hist[idx] > max_lag_ms) max_lag_ms = lag_hist[idx];
+    if (i > 0) {
+      int prev_idx = (hist_head - hist_count + i - 1 + PERF_HISTORY) % PERF_HISTORY;
+      double delta = lag_hist[idx] - lag_hist[prev_idx];
+      if (delta < 0.0) delta = -delta;
+      lag_delta_sum += delta;
+    }
+  }
+  if (hist_count > 0) avg_lag_ms = lag_sum / (double)hist_count;
+  if (hist_count > 1) jitter_ms = lag_delta_sum / (double)(hist_count - 1);
+
+  snprintf(line, sizeof(line), "rect %.1f/s prs %.1f/s", rect_rate, present_rate);
+  draw_overlay_text(g_live.renderer, panel_x, panel_y, line, 255, 255, 255);
+
+  snprintf(line, sizeof(line), "zlib %.1f zrle %.1f", zlib_rate, zrle_rate);
+  draw_overlay_text(g_live.renderer, panel_x, panel_y + 34, line, 255, 220, 96);
+
+  snprintf(line, sizeof(line), "avg %.1f max %.1f", avg_lag_ms, max_lag_ms);
+  draw_overlay_text(g_live.renderer, panel_x, panel_y + 68, line, 128, 255, 160);
+
+  snprintf(line, sizeof(line), "lag %.1f jit %.1f", lag_ms, jitter_ms);
+  draw_overlay_text(g_live.renderer, panel_x, panel_y + 102, line, 255, 128, 196);
+
+  snprintf(line, sizeof(line), "last %s %llupx",
+           live_view_perf_encoding_label(client->perf_last_rect_encoding),
+           (unsigned long long)client->perf_last_rect_pixels);
+  draw_overlay_text(g_live.renderer, panel_x + 448, panel_y + 12, line, 255, 255, 255);
+
+  SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(g_live.renderer, 255, 255, 255, 180);
+  SDL_RenderDrawRect(g_live.renderer, &rates_rect);
+  SDL_RenderDrawRect(g_live.renderer, &lag_rect);
+
+  max_rate = 10.0;
+  max_lag = 16.0;
+  for (i = 0; i < hist_count; ++i) {
+    if (rect_hist[i] > max_rate) max_rate = rect_hist[i];
+    if (present_hist[i] > max_rate) max_rate = present_hist[i];
+    if (zlib_hist[i] > max_rate) max_rate = zlib_hist[i];
+    if (zrle_hist[i] > max_rate) max_rate = zrle_hist[i];
+    if (lag_hist[i] > max_lag) max_lag = lag_hist[i];
+  }
+
+  for (i = 1; i < hist_count; ++i) {
+    int idx0 = (hist_head - hist_count + i - 1 + PERF_HISTORY) % PERF_HISTORY;
+    int idx1 = (hist_head - hist_count + i + PERF_HISTORY) % PERF_HISTORY;
+    int x0 = rates_rect.x + ((i - 1) * (rates_rect.w - 1)) / (PERF_HISTORY - 1);
+    int x1 = rates_rect.x + (i * (rates_rect.w - 1)) / (PERF_HISTORY - 1);
+    int y0;
+    int y1;
+
+    y0 = rates_rect.y + rates_rect.h - 1 - (int)((rect_hist[idx0] / max_rate) * (rates_rect.h - 2));
+    y1 = rates_rect.y + rates_rect.h - 1 - (int)((rect_hist[idx1] / max_rate) * (rates_rect.h - 2));
+    SDL_SetRenderDrawColor(g_live.renderer, 255, 255, 255, 255);
+    SDL_RenderDrawLine(g_live.renderer, x0, y0, x1, y1);
+
+    y0 = rates_rect.y + rates_rect.h - 1 - (int)((present_hist[idx0] / max_rate) * (rates_rect.h - 2));
+    y1 = rates_rect.y + rates_rect.h - 1 - (int)((present_hist[idx1] / max_rate) * (rates_rect.h - 2));
+    SDL_SetRenderDrawColor(g_live.renderer, 64, 255, 96, 255);
+    SDL_RenderDrawLine(g_live.renderer, x0, y0, x1, y1);
+
+    y0 = rates_rect.y + rates_rect.h - 1 - (int)((zlib_hist[idx0] / max_rate) * (rates_rect.h - 2));
+    y1 = rates_rect.y + rates_rect.h - 1 - (int)((zlib_hist[idx1] / max_rate) * (rates_rect.h - 2));
+    SDL_SetRenderDrawColor(g_live.renderer, 255, 220, 96, 255);
+    SDL_RenderDrawLine(g_live.renderer, x0, y0, x1, y1);
+
+    y0 = rates_rect.y + rates_rect.h - 1 - (int)((zrle_hist[idx0] / max_rate) * (rates_rect.h - 2));
+    y1 = rates_rect.y + rates_rect.h - 1 - (int)((zrle_hist[idx1] / max_rate) * (rates_rect.h - 2));
+    SDL_SetRenderDrawColor(g_live.renderer, 80, 200, 255, 255);
+    SDL_RenderDrawLine(g_live.renderer, x0, y0, x1, y1);
+
+    y0 = lag_rect.y + lag_rect.h - 1 - (int)((lag_hist[idx0] / max_lag) * (lag_rect.h - 2));
+    y1 = lag_rect.y + lag_rect.h - 1 - (int)((lag_hist[idx1] / max_lag) * (lag_rect.h - 2));
+    SDL_SetRenderDrawColor(g_live.renderer, 255, 128, 196, 255);
+    SDL_RenderDrawLine(g_live.renderer, x0, y0, x1, y1);
+  }
 }
 
 static void maybe_log_live_view_layers(rfbClient *client, const struct ard_hp_live_view_geometry *geom) {
@@ -587,16 +821,16 @@ static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_v
 
   panel_rect.x = 12;
   panel_rect.y = 24;
-  panel_rect.w = 112;
-  panel_rect.h = 84;
+  panel_rect.w = 720;
+  panel_rect.h = 300;
   SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
   SDL_SetRenderDrawColor(g_live.renderer, 0, 0, 0, 150);
   SDL_RenderFillRect(g_live.renderer, &panel_rect);
 
-  fb_rect.x = panel_rect.x + 8;
-  fb_rect.y = panel_rect.y + 20;
-  fb_rect.w = panel_rect.w - 16;
-  fb_rect.h = panel_rect.h - 28;
+  fb_rect.x = panel_rect.x + 12;
+  fb_rect.y = panel_rect.y + 30;
+  fb_rect.w = 180;
+  fb_rect.h = 135;
   draw_overlay_box(g_live.renderer, &fb_rect, 255, 255, 255, "FB");
 
   fb_w = client->width > 0 ? client->width : 1;
@@ -621,6 +855,7 @@ static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_v
   if (src_rect.w <= 0) src_rect.w = 1;
   if (src_rect.h <= 0) src_rect.h = 1;
   draw_overlay_box(g_live.renderer, &src_rect, 255, 64, 192, "SRC");
+  draw_live_view_perf_overlay(client, panel_rect.x + 210, panel_rect.y + 12);
 }
 
 #endif
@@ -2775,11 +3010,8 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
 static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   SDL_Rect r;
   struct ard_hp_live_view_geometry geom;
-  SDL_Surface *sdl;
   if (!g_runtime.live_view || !client || !g_live.texture || !g_live.renderer) return;
   if (w <= 0 || h <= 0) return;
-  sdl = (SDL_Surface *)rfbClientGetClientData(client, SDL_Init);
-  if (!sdl) return;
 
   /* Strict bounds check to prevent texture update overflow/crash */
   if (x < 0) { w += x; x = 0; }
@@ -2793,12 +3025,7 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   r.y = y;
   r.w = w;
   r.h = h;
-  if (SDL_UpdateTexture(g_live.texture, &r,
-                        (const uint8_t *)sdl->pixels + y * sdl->pitch + x * 4,
-                        sdl->pitch) < 0) {
-    rfbClientErr("live-view: SDL_UpdateTexture failed: %s\n", SDL_GetError());
-    return;
-  }
+  if (!update_live_view_texture_rect(client, &r)) return;
   maybe_update_live_view_crop(client, w, h);
   memset(&geom, 0, sizeof(geom));
   if (!compute_live_view_geometry(client, &geom)) return;
@@ -2819,6 +3046,10 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   draw_live_view_overlay(client, &geom);
   SDL_RenderPresent(g_live.renderer);
   g_live.last_present_us = monotonic_us();
+  client->perf_present_total++;
+  client->perf_last_present_us = (uint64_t)g_live.last_present_us;
+  if (client->perf_last_rect_us > 0 && client->perf_last_present_us >= client->perf_last_rect_us)
+    client->perf_last_rect_to_present_us = client->perf_last_present_us - client->perf_last_rect_us;
   reset_live_view_pending_present();
 }
 #endif

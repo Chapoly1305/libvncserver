@@ -145,8 +145,11 @@ static void FillRectangle(rfbClient* client, int x, int y, int w, int h, uint32_
   }
 }
 
-static void CopyRectangle(rfbClient* client, const uint8_t* buffer, int x, int y, int w, int h) {
+void rfbClientDefaultGotBitmap(rfbClient* client, const uint8_t* buffer, int x, int y, int w, int h) {
   int j;
+  int row_bytes;
+  int stride_bytes;
+  size_t offset;
 
   if (client->frameBuffer == NULL) {
       return;
@@ -154,6 +157,16 @@ static void CopyRectangle(rfbClient* client, const uint8_t* buffer, int x, int y
 
   if (!CheckRect(client, x, y, w, h)) {
     rfbClientLog("Rect out of bounds: %dx%d at (%d, %d)\n", x, y, w, h);
+    return;
+  }
+
+  row_bytes = w * client->format.bitsPerPixel / 8;
+  stride_bytes = client->width * client->format.bitsPerPixel / 8;
+  offset = (size_t)y * (size_t)stride_bytes +
+           (size_t)x * (size_t)(client->format.bitsPerPixel / 8);
+
+  if (x == 0 && w == client->width) {
+    memcpy(client->frameBuffer + offset, buffer, (size_t)row_bytes * (size_t)h);
     return;
   }
 
@@ -378,7 +391,7 @@ rfbClient* rfbGetClient(int bitsPerSample,int samplesPerPixel,
   client->GotFrameBufferUpdate = DummyRect;
   client->GotCopyRect = CopyRectangleFromRectangle;
   client->GotFillRect = FillRectangle;
-  client->GotBitmap = CopyRectangle;
+  client->GotBitmap = rfbClientDefaultGotBitmap;
   client->FinishedFrameBufferUpdate = NULL;
   client->GetPassword = ReadPassword;
   client->MallocFrameBuffer = MallocFrameBuffer;
