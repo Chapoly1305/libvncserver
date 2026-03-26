@@ -9,7 +9,9 @@
  * Environment:
  *   VNC_USER=<username>
  *   VNC_PASS=<password>
- *   VNC_ENCODINGS="<encodings string>"
+ *   VNC_LIVE_VIEW=1
+ *   VNC_LIVE_VIEW_OVERLAY=1
+ *   VNC_ARD_KRB_REALM=<realm>  (optional, for auth35)
  */
 
 #include <rfb/rfbclient.h>
@@ -63,6 +65,14 @@ struct ard_hp_runtime_options {
   int log_input;
   int ard_hp_mode;
   int live_view_overlay;
+  int ard_hp_simple_1080p;
+  int pointer_content_offset_x;
+  int pointer_content_offset_y;
+  uint32_t dynamic_min_delta;
+  uint32_t dynamic_timeout_ms;
+  uint32_t dynamic_refresh_retry_ms;
+  uint32_t visible_content_pad;
+  double input_rect_scale;
 };
 
 struct ard_hp_known_krb_realm {
@@ -136,6 +146,7 @@ struct ard_hp_live_view_state {
   int synthetic_resize_h;
   int window_user_sized;
   int pending_dynamic_resize;
+  int runtime_geometry_dirty;
   int runtime_size_valid;
   uint16_t cached_runtime_w;
   uint16_t cached_runtime_h;
@@ -702,29 +713,6 @@ static int env_flag_enabled(const char *name) {
   return 1;
 }
 
-static int env_flag_default_true(const char *name) {
-  const char *s = ard_hp_getenv_compat(name);
-  if (!s || !*s) return 1;
-  return env_flag_enabled(name);
-}
-
-static int env_flag_default_false(const char *name) {
-  return env_flag_enabled(name);
-}
-
-static const char *ard_hp_getenv_first(const char *a, const char *b) {
-  const char *s = NULL;
-  if (a) {
-    s = ard_hp_getenv_compat(a);
-    if (s && *s) return s;
-  }
-  if (b) {
-    s = ard_hp_getenv_compat(b);
-    if (s && *s) return s;
-  }
-  return NULL;
-}
-
 static void ard_hp_normalize_host(const char *host, char *out, size_t out_cap) {
   size_t n = 0;
   const char *start = host;
@@ -767,13 +755,7 @@ static void ard_hp_seed_known_auth35_realm(const char *host) {
   size_t i;
 
   if (!host || !*host) return;
-  if (ard_hp_getenv_first("VNC_ARD_KRB_REALM", "LIBVNCCLIENT_ARD_KRB_REALM")) return;
-  if (ard_hp_getenv_first("VNC_ARD_KRB_SERVICE_PRINCIPAL",
-                            "LIBVNCCLIENT_ARD_KRB_SERVICE_PRINCIPAL"))
-    return;
-  if (ard_hp_getenv_first("VNC_ARD_KRB_CLIENT_PRINCIPAL",
-                            "LIBVNCCLIENT_ARD_KRB_CLIENT_PRINCIPAL"))
-    return;
+  if (getenv("VNC_ARD_KRB_REALM")) return;
 
   ard_hp_normalize_host(host, normalized, sizeof(normalized));
   if (!normalized[0]) return;
@@ -787,40 +769,19 @@ static void ard_hp_seed_known_auth35_realm(const char *host) {
 }
 
 static int ard_hp_simple_1080p_enabled(void) {
-  return env_flag_enabled("VNC_ARD_HP_SIMPLE_1080P");
+  return g_runtime.ard_hp_simple_1080p;
 }
 
 static double ard_hp_input_rect_scale(void) {
-  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_INPUT_RECT_SCALE");
-  char *end = NULL;
-  double v;
-
-  if (!s || !*s) return 1.0;
-  v = strtod(s, &end);
-  if (!end || *end != '\0' || v <= 0.0) return 1.0;
-  return v;
+  return g_runtime.input_rect_scale;
 }
 
 static int ard_hp_pointer_content_offset_x(void) {
-  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_POINTER_OFFSET_X");
-  char *end = NULL;
-  long v;
-
-  if (!s || !*s) return 0;
-  v = strtol(s, &end, 0);
-  if (!end || *end != '\0') return 0;
-  return (int)v;
+  return g_runtime.pointer_content_offset_x;
 }
 
 static int ard_hp_pointer_content_offset_y(void) {
-  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_POINTER_OFFSET_Y");
-  char *end = NULL;
-  long v;
-
-  if (!s || !*s) return 0;
-  v = strtol(s, &end, 0);
-  if (!end || *end != '\0') return 0;
-  return (int)v;
+  return g_runtime.pointer_content_offset_y;
 }
 
 static int ard_hp_scale_coord_round(int pos, int src_extent, int dst_extent) {
@@ -847,48 +808,24 @@ static uint32_t read_be_u32(const uint8_t *p) {
          (uint32_t)p[3];
 }
 
-static int parse_u32_env(const char *name, uint32_t *out) {
-  const char *s = ard_hp_getenv_compat(name);
-  char *end = NULL;
-  unsigned long v;
-  if (!s || !*s) return 0;
-  v = strtoul(s, &end, 0);
-  if (!end || *end != '\0') return -1;
-  *out = (uint32_t)v;
-  return 1;
-}
-
 static uint32_t ard_hp_dynamic_min_delta(void) {
-  uint32_t v = 0;
-  if (parse_u32_env("VNC_ARD_HP_DYNAMIC_MIN_DELTA", &v) > 0 && v > 0 && v <= 0xffff)
-    return v;
-  return 32;
+  return g_runtime.dynamic_min_delta;
 }
 
 static uint32_t ard_hp_dynamic_timeout_ms(void) {
-  uint32_t v = 0;
-  if (parse_u32_env("VNC_ARD_HP_DYNAMIC_TIMEOUT_MS", &v) > 0 && v > 0) return v;
-  return 6000;
+  return g_runtime.dynamic_timeout_ms;
 }
 
 static uint32_t ard_hp_dynamic_refresh_retry_ms(void) {
-  uint32_t v = 0;
-  if (parse_u32_env("VNC_ARD_HP_DYNAMIC_REFRESH_RETRY_MS", &v) > 0 && v > 0) return v;
-  return 750;
+  return g_runtime.dynamic_refresh_retry_ms;
 }
 
 static uint32_t ard_hp_visible_content_pad(void) {
-  uint32_t v = 0;
-  if (parse_u32_env("VNC_ARD_HP_VISIBLE_PAD", &v) > 0 && v <= 256) return v;
-  return 8;
+  return g_runtime.visible_content_pad;
 }
 
 static int ard_hp_visible_crop_enabled(void) {
-  /* HP backing/layout sizes are authoritative for rendering. Heuristic crop
-   * detection can misclassify legitimate dark regions during startup and after
-   * layout changes, which distorts the live-view aspect. Keep cropping opt-in
-   * for debugging and edge cases instead of enabling it by default. */
-  return env_flag_default_false("VNC_ARD_HP_VISIBLE_CROP");
+  return 0;
 }
 
 static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
@@ -904,18 +841,14 @@ static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
 }
 
 static uint16_t ard_hp_content_width(rfbClient *client) {
-  uint32_t v = 0;
   if (ard_hp_simple_1080p_enabled()) return 1920;
-  if (parse_u32_env("VNC_ARD_HP_REGION_W", &v) > 0 && v <= 0xffff) return (uint16_t)v;
   if (g_hp.display_scaled_w != 0) return g_hp.display_scaled_w;
   if (g_hp.display_ui_w != 0) return g_hp.display_ui_w;
   return client ? (uint16_t)client->width : 0;
 }
 
 static uint16_t ard_hp_content_height(rfbClient *client) {
-  uint32_t v = 0;
   if (ard_hp_simple_1080p_enabled()) return 1080;
-  if (parse_u32_env("VNC_ARD_HP_REGION_H", &v) > 0 && v <= 0xffff) return (uint16_t)v;
   if (g_hp.display_scaled_h != 0) return g_hp.display_scaled_h;
   if (g_hp.display_ui_h != 0) return g_hp.display_ui_h;
   return client ? (uint16_t)client->height : 0;
@@ -948,8 +881,6 @@ static uint16_t ard_hp_display_height(rfbClient *client) {
 }
 
 static uint16_t ard_hp_request_width(rfbClient *client) {
-  uint32_t v = 0;
-  if (parse_u32_env("VNC_ARD_HP_REGION_W", &v) > 0 && v <= 0xffff) return (uint16_t)v;
   if (g_runtime.ard_hp_mode) {
     uint16_t w = ard_hp_backing_width(client);
     if (w != 0) return w;
@@ -964,8 +895,6 @@ static uint16_t ard_hp_request_width(rfbClient *client) {
 }
 
 static uint16_t ard_hp_request_height(rfbClient *client) {
-  uint32_t v = 0;
-  if (parse_u32_env("VNC_ARD_HP_REGION_H", &v) > 0 && v <= 0xffff) return (uint16_t)v;
   if (g_runtime.ard_hp_mode) {
     uint16_t h = ard_hp_backing_height(client);
     if (h != 0) return h;
@@ -1268,6 +1197,7 @@ static void destroy_live_view(void) {
   g_live.reveal_after_initial_refresh = 0;
   g_live.suppress_reveal_events = 0;
   g_live.window_user_sized = 0;
+  g_live.runtime_geometry_dirty = 1;
   g_live.debounce_runtime_w = 0;
   g_live.debounce_runtime_h = 0;
   g_live.debounce_runtime_started_ms = 0;
@@ -1406,7 +1336,7 @@ static int inflate_cursor_payload(const uint8_t *src, uint32_t src_len, uint8_t 
 }
 
 static int ard_hp_dump_cursor_bmp_enabled(void) {
-  return env_flag_enabled("VNC_ARD_HP_DUMP_CURSOR_BMP");
+  return 0;
 }
 
 static void ard_hp_log_cursor_fingerprint(uint32_t cache_id, int width, int height,
@@ -1597,6 +1527,7 @@ static void refresh_live_view_layout(rfbClient *client) {
 static void invalidate_live_view_runtime_size(void) {
 #if defined(ARDHPDEBUG_HAS_SDL)
   g_live.runtime_size_valid = 0;
+  g_live.runtime_geometry_dirty = 1;
 #endif
 }
 
@@ -1703,6 +1634,7 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   g_live.cached_runtime_w = (uint16_t)w;
   g_live.cached_runtime_h = (uint16_t)h;
   g_live.runtime_size_valid = 1;
+  g_live.runtime_geometry_dirty = 0;
   *out_w = g_live.cached_runtime_w;
   *out_h = g_live.cached_runtime_h;
   return 1;
@@ -2543,7 +2475,7 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   int alloc_height = height > 0 ? height : 1;
   int depth = client->format.bitsPerPixel ? client->format.bitsPerPixel : 32;
 
-  g_live.present_per_rect = env_flag_enabled("VNC_LIVE_VIEW_PRESENT_PER_RECT");
+  g_live.present_per_rect = 0;
 
   sdl = (SDL_Surface *)rfbClientGetClientData(client, SDL_Init);
   if (sdl) {
@@ -3151,47 +3083,11 @@ static void on_sigint(int sig) {
 }
 
 static void configure_auth_schemes(rfbClient *client) {
-  const char *env = getenv("VNC_AUTH_SCHEMES");
-  if (env && *env) {
-    uint32_t auth_schemes[32];
-    char *tmp = strdup(env);
-    char *tok = NULL;
-    char *save = NULL;
-    int i = 0;
-
-    if (!tmp) return;
-    for (tok = strtok_r(tmp, ",", &save); tok && i < 31;
-         tok = strtok_r(NULL, ",", &save)) {
-      while (*tok == ' ' || *tok == '\t') tok++;
-      if (!*tok) continue;
-      auth_schemes[i++] = (uint32_t)strtoul(tok, NULL, 0);
-    }
-    auth_schemes[i] = 0;
-    if (i > 0) {
-      SetClientAuthSchemes(client, auth_schemes, -1);
-      rfbClientLog("using VNC_AUTH_SCHEMES='%s'\n", env);
-      free(tmp);
-      return;
-    }
-    free(tmp);
-  }
-
-  /* Default preference order for ARD HP sessions:
-   * prefer SRP variants because they already export a rekey session key for the
-   * post-auth high-performance transport. */
   {
-    uint32_t auth_schemes[6];
+    uint32_t auth_schemes[4];
     int i = 0;
-    const char *realm = ard_hp_getenv_first("VNC_ARD_KRB_REALM", "LIBVNCCLIENT_ARD_KRB_REALM");
-    const char *principal = ard_hp_getenv_first("VNC_ARD_KRB_CLIENT_PRINCIPAL",
-                                                  "LIBVNCCLIENT_ARD_KRB_CLIENT_PRINCIPAL");
-    const char *user = getenv("VNC_USER");
-    int kerb_ready = 0;
-
-    if ((realm && *realm) || (principal && *principal) || (user && strchr(user, '@'))) kerb_ready = 1;
     auth_schemes[i++] = rfbARDAuthDirectSRP;
     auth_schemes[i++] = rfbARDAuthRSASRP;
-    if (kerb_ready) auth_schemes[i++] = rfbARDAuthKerberosGSSAPI;
     auth_schemes[i++] = rfbARDAuthDH;
     auth_schemes[i] = 0;
     SetClientAuthSchemes(client, auth_schemes, -1);
@@ -3200,22 +3096,11 @@ static void configure_auth_schemes(rfbClient *client) {
 
 static void configure_ard_auth_overrides(rfbClient *client) {
   const char *realm;
-  const char *client_principal;
-  const char *service_principal;
 
   if (!client) return;
 
-  realm = ard_hp_getenv_first("VNC_ARD_KRB_REALM", "LIBVNCCLIENT_ARD_KRB_REALM");
-  client_principal = ard_hp_getenv_first("VNC_ARD_KRB_CLIENT_PRINCIPAL",
-                                           "LIBVNCCLIENT_ARD_KRB_CLIENT_PRINCIPAL");
-  service_principal = ard_hp_getenv_first("VNC_ARD_KRB_SERVICE_PRINCIPAL",
-                                            "LIBVNCCLIENT_ARD_KRB_SERVICE_PRINCIPAL");
-
+  realm = getenv("VNC_ARD_KRB_REALM");
   if (realm && *realm) rfbClientSetARDAuthRealm(client, realm);
-  if (client_principal && *client_principal)
-    rfbClientSetARDAuthClientPrincipal(client, client_principal);
-  if (service_principal && *service_principal)
-    rfbClientSetARDAuthServicePrincipal(client, service_principal);
 }
 
 static rfbCredential *get_credential(rfbClient *client, int credentialType) {
@@ -3470,11 +3355,17 @@ int main(int argc, char **argv) {
 
   signal(SIGINT, on_sigint);
   g_runtime.live_view = env_flag_enabled("VNC_LIVE_VIEW");
-  g_runtime.live_view_vsync = env_flag_enabled("VNC_LIVE_VIEW_VSYNC");
-  g_runtime.low_latency_input = env_flag_default_true("VNC_LIVE_VIEW_LOW_LATENCY_INPUT");
-  g_runtime.log_input = env_flag_enabled("VNC_LOG_INPUT");
-  g_runtime.ard_hp_mode = env_flag_enabled("VNC_ARD_HP");
+  g_runtime.live_view_vsync = 0;
+  g_runtime.low_latency_input = 1;
+  g_runtime.log_input = 0;
+  g_runtime.ard_hp_mode = 1;
   g_runtime.live_view_overlay = env_flag_enabled("VNC_LIVE_VIEW_OVERLAY");
+  g_runtime.ard_hp_simple_1080p = 0;
+  g_runtime.dynamic_min_delta = 32;
+  g_runtime.dynamic_timeout_ms = 6000;
+  g_runtime.dynamic_refresh_retry_ms = 750;
+  g_runtime.visible_content_pad = 8;
+  g_runtime.input_rect_scale = 1.0;
 
 #if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) {
@@ -3532,15 +3423,7 @@ int main(int argc, char **argv) {
     argc = 2;
   }
 
-  if (!getenv("VNC_ENCODINGS")) {
-    if (g_runtime.ard_hp_mode)
-      client->appData.encodingsString = NULL;
-    else
-      client->appData.encodingsString =
-          "copyrect tight zrle hextile zlib corre rre raw";
-  } else {
-    client->appData.encodingsString = getenv("VNC_ENCODINGS");
-  }
+  client->appData.encodingsString = NULL;
 
   if (!rfbInitClient(client, &argc, argv)) {
     return 1;
@@ -3574,7 +3457,9 @@ int main(int argc, char **argv) {
       while (SDL_PollEvent(&e)) {
         if (!handle_live_view_event(client, &e)) break;
       }
-      if (!maybe_observe_dynamic_resolution_target(client, "event-loop")) break;
+      if (g_live.runtime_geometry_dirty && !g_live.pending_dynamic_resize) {
+        if (!maybe_observe_dynamic_resolution_target(client, "event-loop")) break;
+      }
       if (g_live.pending_dynamic_resize) {
         if (!live_view_dynamic_resize_stable(client)) goto wait_for_server;
         if (!maybe_send_dynamic_resolution_update(client, "window-event", TRUE)) break;
