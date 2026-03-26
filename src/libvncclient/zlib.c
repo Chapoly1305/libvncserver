@@ -33,6 +33,7 @@
 #define CARDBPP CONCAT3E(uint,BPP,_t)
 #define EnsureRawBufferBPP CONCAT2E(EnsureRawBuffer,BPP)
 #define CanDirectDecodeBPP CONCAT2E(CanDirectDecode,BPP)
+#define CopyIntoFrameBufferBPP CONCAT2E(CopyIntoFrameBuffer,BPP)
 
 static rfbBool
 EnsureRawBufferBPP(rfbClient* client, size_t need)
@@ -91,6 +92,42 @@ CanDirectDecodeBPP(rfbClient* client, int rx, int ry, int rw, int rh,
   *row_bytes_out = (size_t)rw * (size_t)(BPP / 8);
   offset = (size_t)ry * (*stride_bytes_out) + (size_t)rx * (size_t)(BPP / 8);
   *dst_out = (Bytef *)(client->frameBuffer + offset);
+  return TRUE;
+}
+
+static rfbBool
+CopyIntoFrameBufferBPP(rfbClient* client, const Bytef *src,
+                       int rx, int ry, int rw, int rh)
+{
+  size_t row_bytes;
+  size_t stride_bytes;
+  size_t offset;
+  Bytef *dst;
+  int row;
+
+  if (client->frameBuffer == NULL ||
+      rx < 0 || ry < 0 ||
+      rw <= 0 || rh <= 0 ||
+      rx + rw > client->width ||
+      ry + rh > client->height) {
+    return FALSE;
+  }
+
+  row_bytes = (size_t)rw * (size_t)(BPP / 8);
+  stride_bytes = (size_t)client->width * (size_t)(BPP / 8);
+  offset = (size_t)ry * stride_bytes + (size_t)rx * (size_t)(BPP / 8);
+  dst = (Bytef *)(client->frameBuffer + offset);
+
+  if (rx == 0 && rw == client->width) {
+    memcpy(dst, src, row_bytes * (size_t)rh);
+    return TRUE;
+  }
+
+  for (row = 0; row < rh; ++row) {
+    memcpy(dst, src, row_bytes);
+    dst += stride_bytes;
+    src += row_bytes;
+  }
   return TRUE;
 }
 
@@ -208,7 +245,14 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
   if ( inflateResult == Z_OK ) {
 
     /* Put the uncompressed contents of the update on the screen. */
-    if (!direct_decode) {
+    if (!direct_decode && client->GotBitmap == rfbClientDefaultGotBitmap) {
+      if (!CopyIntoFrameBufferBPP(client, (const Bytef *)client->raw_buffer,
+                                  rx, ry, rw, rh)) {
+        rfbClientLog("zlib framebuffer copy failed for rect %dx%d at (%d,%d)\n",
+                     rw, rh, rx, ry);
+        return FALSE;
+      }
+    } else if (!direct_decode) {
       client->GotBitmap(client, (uint8_t *)client->raw_buffer, rx, ry, rw, rh);
     }
   }
@@ -228,5 +272,6 @@ HandleZlibBPP (rfbClient* client, int rx, int ry, int rw, int rh)
 #undef CARDBPP
 #undef EnsureRawBufferBPP
 #undef CanDirectDecodeBPP
+#undef CopyIntoFrameBufferBPP
 
 #endif

@@ -1150,13 +1150,12 @@ static uint16_t ard_hp_display_height(rfbClient *client) {
 }
 
 static uint16_t ard_hp_request_width(rfbClient *client) {
-  if (g_runtime.ard_hp_mode) {
-    uint16_t w = ard_hp_backing_width(client);
-    if (w != 0) return w;
-  }
+  uint16_t w = ard_hp_backing_width(client);
+
+  if (w != 0) return w;
 #if defined(ARDHPDEBUG_HAS_SDL)
-  if (g_runtime.live_view && g_runtime.ard_hp_mode) {
-    uint16_t w = ard_hp_display_width(client);
+  if (g_runtime.live_view) {
+    w = ard_hp_display_width(client);
     if (w != 0) return w;
   }
 #endif
@@ -1164,13 +1163,12 @@ static uint16_t ard_hp_request_width(rfbClient *client) {
 }
 
 static uint16_t ard_hp_request_height(rfbClient *client) {
-  if (g_runtime.ard_hp_mode) {
-    uint16_t h = ard_hp_backing_height(client);
-    if (h != 0) return h;
-  }
+  uint16_t h = ard_hp_backing_height(client);
+
+  if (h != 0) return h;
 #if defined(ARDHPDEBUG_HAS_SDL)
-  if (g_runtime.live_view && g_runtime.ard_hp_mode) {
-    uint16_t h = ard_hp_display_height(client);
+  if (g_runtime.live_view) {
+    h = ard_hp_display_height(client);
     if (h != 0) return h;
   }
 #endif
@@ -1237,12 +1235,12 @@ static double ard_hp_runtime_scale_factor(void) {
 static int ard_hp_send_post_rekey_setup(rfbClient *client);
 
 static int configure_ard_hp_mode(rfbClient *client) {
-  if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (!client) return 1;
   return rfbClientConfigureARDHP(client);
 }
 
 static int run_ard_hp_setup(rfbClient *client) {
-  if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (!client) return 1;
   return rfbClientRunARDHPPrelude(client);
 }
 
@@ -1250,7 +1248,7 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   uint16_t region_w;
   uint16_t region_h;
 
-  if (!g_runtime.ard_hp_mode || !client || g_hp.post_rekey_sent) return 1;
+  if (!client || g_hp.post_rekey_sent) return 1;
 
   if (g_hp.post_rekey_phase == 0)
     rfbClientLog("ard-hp: sending post-rekey setup phase 1 over CBC transport\n");
@@ -1290,7 +1288,7 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
 static int ard_hp_maybe_advance_post_rekey_setup(rfbClient *client) {
   uint32_t recv_records;
 
-  if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (!client) return 1;
   if (g_hp.post_rekey_ready != 2 || g_hp.post_rekey_sent) return 1;
   recv_records = rfbClientARDHPReceivedRecordCount(client);
 
