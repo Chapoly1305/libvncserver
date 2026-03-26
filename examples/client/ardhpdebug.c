@@ -39,6 +39,10 @@
 #define ARDHPDEBUG_DEBUG_BUILD 0
 #endif
 
+#if !defined(ARDHPDEBUG_MINIMAL_RELEASE)
+#define ARDHPDEBUG_MINIMAL_RELEASE 0
+#endif
+
 #define ARDHP_INFO_LOG(...) rfbClientLog(__VA_ARGS__)
 #define ARDHP_ERROR_LOG(...) rfbClientErr(__VA_ARGS__)
 #if ARDHPDEBUG_DEBUG_BUILD
@@ -119,6 +123,10 @@ struct ard_hp_session_state {
 static struct ard_hp_frame_stats g_frame = {0};
 static struct ard_hp_runtime_options g_runtime = {0};
 static struct ard_hp_session_state g_hp = {0};
+
+static void ardhp_minimal_release_log(const char *format, ...) {
+  (void)format;
+}
 
 static const uint16_t kARDHPFramebufferSlack = 2;
 
@@ -452,6 +460,7 @@ static void note_live_view_input(void) {
   g_live.last_input_us = monotonic_us();
 }
 
+#if !ARDHPDEBUG_MINIMAL_RELEASE
 static const uint8_t *overlay_glyph_rows(char ch) {
   if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
   switch (ch) {
@@ -857,6 +866,23 @@ static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_v
   draw_overlay_box(g_live.renderer, &src_rect, 255, 64, 192, "SRC");
   draw_live_view_perf_overlay(client, panel_rect.x + 210, panel_rect.y + 12);
 }
+#else
+static void maybe_log_live_view_layers(rfbClient *client, const struct ard_hp_live_view_geometry *geom) {
+  (void)client;
+  (void)geom;
+}
+
+static void draw_live_view_perf_overlay(rfbClient *client, int panel_x, int panel_y) {
+  (void)client;
+  (void)panel_x;
+  (void)panel_y;
+}
+
+static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_view_geometry *geom) {
+  (void)client;
+  (void)geom;
+}
+#endif
 
 #endif
 
@@ -3584,13 +3610,22 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+#if ARDHPDEBUG_MINIMAL_RELEASE
+  rfbClientLog = ardhp_minimal_release_log;
+  rfbEnableClientLogging = FALSE;
+#endif
+
   signal(SIGINT, on_sigint);
   g_runtime.live_view = env_flag_enabled("VNC_LIVE_VIEW");
   g_runtime.live_view_vsync = 0;
   g_runtime.low_latency_input = 1;
   g_runtime.log_input = 0;
   g_runtime.ard_hp_mode = 1;
+#if ARDHPDEBUG_MINIMAL_RELEASE
+  g_runtime.live_view_overlay = 0;
+#else
   g_runtime.live_view_overlay = env_flag_enabled("VNC_LIVE_VIEW_OVERLAY");
+#endif
   g_runtime.ard_hp_simple_1080p = 0;
   g_runtime.dynamic_min_delta = 32;
   g_runtime.dynamic_timeout_ms = 6000;
