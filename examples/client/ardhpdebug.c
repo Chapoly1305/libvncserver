@@ -127,6 +127,7 @@ struct ard_hp_live_view_state {
   SDL_Window *window;
   int window_visible;
   int reveal_after_initial_refresh;
+  int suppress_reveal_events;
   int synthetic_resize_events;
   int synthetic_resize_w;
   int synthetic_resize_h;
@@ -228,6 +229,72 @@ static void arm_live_view_refresh_present(void) {
   g_live.needs_clear = 1;
 }
 
+static const char *live_view_window_event_name(Uint8 event) {
+  switch (event) {
+    case SDL_WINDOWEVENT_SHOWN: return "shown";
+    case SDL_WINDOWEVENT_HIDDEN: return "hidden";
+    case SDL_WINDOWEVENT_EXPOSED: return "exposed";
+    case SDL_WINDOWEVENT_MOVED: return "moved";
+    case SDL_WINDOWEVENT_RESIZED: return "resized";
+    case SDL_WINDOWEVENT_SIZE_CHANGED: return "size-changed";
+    case SDL_WINDOWEVENT_MINIMIZED: return "minimized";
+    case SDL_WINDOWEVENT_MAXIMIZED: return "maximized";
+    case SDL_WINDOWEVENT_RESTORED: return "restored";
+    case SDL_WINDOWEVENT_ENTER: return "enter";
+    case SDL_WINDOWEVENT_LEAVE: return "leave";
+    case SDL_WINDOWEVENT_FOCUS_GAINED: return "focus-gained";
+    case SDL_WINDOWEVENT_FOCUS_LOST: return "focus-lost";
+    case SDL_WINDOWEVENT_CLOSE: return "close";
+#if SDL_VERSION_ATLEAST(2, 0, 5)
+    case SDL_WINDOWEVENT_TAKE_FOCUS: return "take-focus";
+    case SDL_WINDOWEVENT_HIT_TEST: return "hit-test";
+#endif
+    default: return "other";
+  }
+}
+
+static void debug_log_live_view_window_state(const char *reason) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  int window_w = 0;
+  int window_h = 0;
+  int output_w = 0;
+  int output_h = 0;
+  int display_index = 0;
+  Uint32 flags = 0;
+  SDL_Rect bounds;
+
+  if (!g_live.window) return;
+  memset(&bounds, 0, sizeof(bounds));
+  flags = SDL_GetWindowFlags(g_live.window);
+  SDL_GetWindowSize(g_live.window, &window_w, &window_h);
+  if (g_live.renderer && SDL_GetRendererOutputSize(g_live.renderer, &output_w, &output_h) < 0) {
+    output_w = 0;
+    output_h = 0;
+  }
+  display_index = SDL_GetWindowDisplayIndex(g_live.window);
+  if (display_index < 0) display_index = 0;
+  if (SDL_GetDisplayUsableBounds(display_index, &bounds) != 0) {
+    bounds.w = 0;
+    bounds.h = 0;
+  }
+  ARDHP_DEBUG_LOG("ard-hp: live-view window-state reason=%s flags=0x%08x win=%dx%d out=%dx%d usable=%dx%d user=%d pending=%d synthetic=%d cached=%ux%u debounce=%ux%u\n",
+                  reason ? reason : "unspecified",
+                  (unsigned)flags,
+                  window_w, window_h,
+                  output_w, output_h,
+                  bounds.w, bounds.h,
+                  g_live.window_user_sized,
+                  g_live.pending_dynamic_resize,
+                  g_live.synthetic_resize_events,
+                  (unsigned)g_live.cached_runtime_w,
+                  (unsigned)g_live.cached_runtime_h,
+                  (unsigned)g_live.debounce_runtime_w,
+                  (unsigned)g_live.debounce_runtime_h);
+#else
+  (void)reason;
+#endif
+}
+
 static void maybe_reveal_live_view_after_initial_refresh(rfbClient *client) {
   if (!g_runtime.live_view || !client) return;
   if (!g_live.window || g_live.window_visible) return;
@@ -236,12 +303,11 @@ static void maybe_reveal_live_view_after_initial_refresh(rfbClient *client) {
   if (g_runtime.ard_hp_mode &&
       !g_hp.initial_full_refresh_done &&
       !g_live.has_pending_present) return;
-  g_live.synthetic_resize_events += 2;
-  g_live.synthetic_resize_w = 0;
-  g_live.synthetic_resize_h = 0;
+  g_live.suppress_reveal_events = 2;
   SDL_ShowWindow(g_live.window);
   g_live.window_visible = 1;
   g_live.reveal_after_initial_refresh = 0;
+  debug_log_live_view_window_state("reveal");
   refresh_live_view_layout(client);
   queue_live_view_present(0, 0, client->width, client->height);
   rfbClientLog("ard-hp: revealing live-view after initial layout/full refresh\n");
@@ -279,6 +345,7 @@ static int live_view_dynamic_resize_stable(rfbClient *client) {
     g_live.debounce_runtime_w = target_w;
     g_live.debounce_runtime_h = target_h;
     g_live.debounce_runtime_started_ms = now_ms;
+    debug_log_live_view_window_state("debounce-target-change");
     rfbClientLog("ard-hp: waiting for window resize to settle target=%ux%u\n",
                  (unsigned)target_w, (unsigned)target_h);
     return 0;
@@ -287,9 +354,8 @@ static int live_view_dynamic_resize_stable(rfbClient *client) {
     g_live.debounce_runtime_started_ms = now_ms;
     return 0;
   }
-  if (now_ms > 0 && (now_ms - g_live.debounce_runtime_started_ms) < debounce_ms) {
-    return 0;
-  }
+  if (now_ms > 0 && (now_ms - g_live.debounce_runtime_started_ms) < debounce_ms) return 0;
+  debug_log_live_view_window_state("debounce-stable");
   g_live.debounce_runtime_w = 0;
   g_live.debounce_runtime_h = 0;
   g_live.debounce_runtime_started_ms = 0;
@@ -1233,6 +1299,7 @@ static void destroy_live_view(void) {
   }
   g_live.window_visible = 0;
   g_live.reveal_after_initial_refresh = 0;
+  g_live.suppress_reveal_events = 0;
   g_live.window_user_sized = 0;
   g_live.debounce_runtime_w = 0;
   g_live.debounce_runtime_h = 0;
@@ -1867,15 +1934,20 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
 
 static int ard_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
   long long elapsed_ms = 0;
+  uint16_t timed_out_w = 0;
+  uint16_t timed_out_h = 0;
 
   if (!client || !g_hp.dynamic_request_in_flight) return 1;
   if (g_hp.dynamic_request_started_ms <= 0) return 1;
   elapsed_ms = monotonic_ms() - g_hp.dynamic_request_started_ms;
   if (elapsed_ms < 0 || (uint32_t)elapsed_ms < ard_hp_dynamic_timeout_ms()) return 1;
 
+  timed_out_w = g_hp.last_dynamic_request_w;
+  timed_out_h = g_hp.last_dynamic_request_h;
+
   rfbClientLog("ard-hp: dynamic request %ux%u timed out after %lld ms\n",
-               (unsigned)g_hp.last_dynamic_request_w,
-               (unsigned)g_hp.last_dynamic_request_h,
+               (unsigned)timed_out_w,
+               (unsigned)timed_out_h,
                elapsed_ms);
   ard_hp_clear_dynamic_request_state(TRUE);
   if (g_hp.pending_dynamic_target_w != 0 && g_hp.pending_dynamic_target_h != 0) {
@@ -1887,7 +1959,25 @@ static int ard_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
     return maybe_send_dynamic_resolution_update(client, "dynamic-timeout", TRUE);
   }
   if (live_view_should_drive_dynamic_resize()) {
-    g_live.pending_dynamic_resize = 1;
+    uint16_t current_w = 0;
+    uint16_t current_h = 0;
+    uint16_t display_w = ard_hp_display_width(client);
+    uint16_t display_h = ard_hp_display_height(client);
+    if (ard_hp_compute_dynamic_resolution_target(client, &current_w, &current_h) &&
+        current_w != 0 && current_h != 0 &&
+        ard_hp_dynamic_target_materially_diff(current_w, current_h, display_w, display_h)) {
+      if (current_w != timed_out_w || current_h != timed_out_h) {
+        g_live.pending_dynamic_resize = 1;
+        g_live.debounce_runtime_w = 0;
+        g_live.debounce_runtime_h = 0;
+        g_live.debounce_runtime_started_ms = 0;
+        rfbClientLog("ard-hp: re-arming dynamic resize after timeout to updated target %ux%u\n",
+                     (unsigned)current_w, (unsigned)current_h);
+      } else {
+        rfbClientLog("ard-hp: not retrying timed-out dynamic target %ux%u until target changes\n",
+                     (unsigned)timed_out_w, (unsigned)timed_out_h);
+      }
+    }
   }
   return 1;
 }
@@ -2602,7 +2692,9 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_EXPOSED:
           invalidate_live_view_runtime_size();
           refresh_live_view_layout(client);
-          if (!ard_hp_startup_layout_pending() && g_live.synthetic_resize_events <= 0) {
+          if (g_live.suppress_reveal_events > 0) {
+            g_live.suppress_reveal_events--;
+          } else if (!ard_hp_startup_layout_pending() && g_live.synthetic_resize_events <= 0) {
             g_live.pending_dynamic_resize = 1;
           }
           queue_live_view_present(0, 0, client->width, client->height);
@@ -2618,7 +2710,17 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_SHOWN:
         {
           invalidate_live_view_runtime_size();
-          if (live_view_event_matches_synthetic_resize(e)) {
+          ARDHP_DEBUG_LOG("ard-hp: live-view window-event=%s(%u) data=%dx%d synthetic=%d\n",
+                          live_view_window_event_name(e->window.event),
+                          (unsigned)e->window.event,
+                          e->window.data1,
+                          e->window.data2,
+                          g_live.synthetic_resize_events);
+          debug_log_live_view_window_state("window-event");
+          if (e->window.event == SDL_WINDOWEVENT_SHOWN &&
+              g_live.suppress_reveal_events > 0) {
+            g_live.suppress_reveal_events--;
+          } else if (live_view_event_matches_synthetic_resize(e)) {
             g_live.synthetic_resize_events--;
             if (g_live.synthetic_resize_events <= 0) {
               g_live.synthetic_resize_w = 0;
@@ -3442,6 +3544,7 @@ int main(int argc, char **argv) {
 
   start = time(NULL);
   while (!g_stop && (seconds < 0 || (time(NULL) - start) < seconds)) {
+    int n = 0;
 #if defined(ARDHPDEBUG_HAS_SDL)
     if (g_runtime.live_view) {
       SDL_Event e;
@@ -3450,9 +3553,7 @@ int main(int argc, char **argv) {
       }
       if (!maybe_observe_dynamic_resolution_target(client, "event-loop")) break;
       if (g_live.pending_dynamic_resize) {
-        if (!live_view_dynamic_resize_stable(client)) {
-          continue;
-        }
+        if (!live_view_dynamic_resize_stable(client)) goto wait_for_server;
         if (!maybe_send_dynamic_resolution_update(client, "window-event", TRUE)) break;
         g_live.pending_dynamic_resize = 0;
         g_live.debounce_runtime_w = 0;
@@ -3461,7 +3562,7 @@ int main(int argc, char **argv) {
       }
     }
 #endif
-    int n = 0;
+wait_for_server:
     n = WaitForMessage(client, main_loop_wait_usecs());
     if (n < 0) break;
     if (n > 0) {
