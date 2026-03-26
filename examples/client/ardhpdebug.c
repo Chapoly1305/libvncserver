@@ -125,6 +125,8 @@ struct ard_hp_live_view_state {
   SDL_Texture *texture;
   SDL_Renderer *renderer;
   SDL_Window *window;
+  int window_visible;
+  int reveal_after_initial_refresh;
   int synthetic_resize_events;
   int synthetic_resize_w;
   int synthetic_resize_h;
@@ -135,6 +137,9 @@ struct ard_hp_live_view_state {
   uint16_t cached_runtime_h;
   uint16_t last_runtime_w;
   uint16_t last_runtime_h;
+  uint16_t debounce_runtime_w;
+  uint16_t debounce_runtime_h;
+  long long debounce_runtime_started_ms;
   int has_pending_present;
   int pending_x;
   int pending_y;
@@ -179,6 +184,7 @@ static void invalidate_live_view_runtime_size(void);
 static int maybe_present_live_view_if_due(rfbClient *client, int force);
 static void note_live_view_input(void);
 static long long monotonic_us(void);
+static long long monotonic_ms(void);
 static uint16_t read_be_u16(const uint8_t *p);
 static uint16_t ard_hp_backing_width(rfbClient *client);
 static uint16_t ard_hp_backing_height(rfbClient *client);
@@ -193,6 +199,11 @@ static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_v
 static void maybe_log_live_view_layers(rfbClient *client, const struct ard_hp_live_view_geometry *geom);
 static void maybe_note_live_view_geometry_intent(rfbClient *client,
                                                  const struct ard_hp_live_view_geometry *geom);
+static void queue_live_view_present(int x, int y, int w, int h);
+static void refresh_live_view_layout(rfbClient *client);
+static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
+static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
+                                                 uint16_t b_w, uint16_t b_h);
 #endif
 
 static int ard_hp_should_suppress_incremental(void) {
@@ -215,6 +226,78 @@ static void arm_live_view_refresh_present(void) {
   reset_live_view_pending_present();
   g_live.awaiting_refresh_present = 1;
   g_live.needs_clear = 1;
+}
+
+static void maybe_reveal_live_view_after_initial_refresh(rfbClient *client) {
+  if (!g_runtime.live_view || !client) return;
+  if (!g_live.window || g_live.window_visible) return;
+  if (!g_live.reveal_after_initial_refresh) return;
+  if (g_runtime.ard_hp_mode && !g_hp.displayinfo2_seen) return;
+  if (g_runtime.ard_hp_mode &&
+      !g_hp.initial_full_refresh_done &&
+      !g_live.has_pending_present) return;
+  g_live.synthetic_resize_events += 2;
+  g_live.synthetic_resize_w = 0;
+  g_live.synthetic_resize_h = 0;
+  SDL_ShowWindow(g_live.window);
+  g_live.window_visible = 1;
+  g_live.reveal_after_initial_refresh = 0;
+  refresh_live_view_layout(client);
+  queue_live_view_present(0, 0, client->width, client->height);
+  rfbClientLog("ard-hp: revealing live-view after initial layout/full refresh\n");
+  if (g_live.present_per_rect) {
+    present_live_view(client, 0, 0, client->width, client->height);
+  } else {
+    maybe_present_live_view_if_due(client, TRUE);
+  }
+}
+
+static int live_view_dynamic_resize_stable(rfbClient *client) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  uint16_t target_w = 0;
+  uint16_t target_h = 0;
+  uint16_t display_w = 0;
+  uint16_t display_h = 0;
+  long long now_ms = 0;
+  const long long debounce_ms = 250;
+
+  if (!client || !g_runtime.live_view || !g_live.window) return 1;
+  if (!g_live.pending_dynamic_resize) return 1;
+  if (!live_view_runtime_display_size(client, &target_w, &target_h)) return 0;
+  if (target_w == 0 || target_h == 0) return 0;
+  display_w = ard_hp_display_width(client);
+  display_h = ard_hp_display_height(client);
+  if (!ard_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) {
+    g_live.debounce_runtime_w = 0;
+    g_live.debounce_runtime_h = 0;
+    g_live.debounce_runtime_started_ms = 0;
+    return 1;
+  }
+  now_ms = monotonic_ms();
+  if (target_w != g_live.debounce_runtime_w ||
+      target_h != g_live.debounce_runtime_h) {
+    g_live.debounce_runtime_w = target_w;
+    g_live.debounce_runtime_h = target_h;
+    g_live.debounce_runtime_started_ms = now_ms;
+    rfbClientLog("ard-hp: waiting for window resize to settle target=%ux%u\n",
+                 (unsigned)target_w, (unsigned)target_h);
+    return 0;
+  }
+  if (g_live.debounce_runtime_started_ms <= 0) {
+    g_live.debounce_runtime_started_ms = now_ms;
+    return 0;
+  }
+  if (now_ms > 0 && (now_ms - g_live.debounce_runtime_started_ms) < debounce_ms) {
+    return 0;
+  }
+  g_live.debounce_runtime_w = 0;
+  g_live.debounce_runtime_h = 0;
+  g_live.debounce_runtime_started_ms = 0;
+  return 1;
+#else
+  (void)client;
+  return 1;
+#endif
 }
 
 static void queue_live_view_present(int x, int y, int w, int h) {
@@ -1148,7 +1231,12 @@ static void destroy_live_view(void) {
     SDL_DestroyWindow(g_live.window);
     g_live.window = NULL;
   }
+  g_live.window_visible = 0;
+  g_live.reveal_after_initial_refresh = 0;
   g_live.window_user_sized = 0;
+  g_live.debounce_runtime_w = 0;
+  g_live.debounce_runtime_h = 0;
+  g_live.debounce_runtime_started_ms = 0;
   SDL_ShowCursor(SDL_ENABLE);
   (void)sdl;
 }
@@ -1631,6 +1719,11 @@ static int live_view_should_drive_dynamic_resize(void) {
 #endif
 }
 
+static int ard_hp_startup_layout_pending(void) {
+  if (!g_runtime.ard_hp_mode) return 0;
+  return !g_hp.displayinfo2_seen;
+}
+
 static void maybe_note_live_view_geometry_intent(rfbClient *client,
                                                  const struct ard_hp_live_view_geometry *geom) {
 #if defined(ARDHPDEBUG_HAS_SDL)
@@ -1641,6 +1734,7 @@ static void maybe_note_live_view_geometry_intent(rfbClient *client,
 
   if (!client || !geom || !geom->valid) return;
   if (!g_runtime.live_view || !g_runtime.ard_hp_mode) return;
+  if (ard_hp_startup_layout_pending()) return;
   if (!live_view_should_drive_dynamic_resize()) return;
   if (geom->window_w <= 0 || geom->window_h <= 0) return;
   if (geom->window_w > 0xffff || geom->window_h > 0xffff) return;
@@ -2410,20 +2504,29 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   live_view_target_size(client, &view_width, &view_height);
 
   if (!g_live.window) {
+    Uint32 window_create_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    if (g_runtime.ard_hp_mode && !g_hp.displayinfo2_seen) {
+      window_create_flags |= SDL_WINDOW_HIDDEN;
+    }
     g_live.window = SDL_CreateWindow(
         client->desktopName ? client->desktopName : "ardhpdebug",
         SDL_WINDOWPOS_UNDEFINED,
         SDL_WINDOWPOS_UNDEFINED,
         view_width,
         view_height,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+        window_create_flags);
     if (!g_live.window) {
       rfbClientErr("live-view: SDL_CreateWindow failed: %s\n", SDL_GetError());
       SDL_FreeSurface(sdl);
       rfbClientSetClientData(client, SDL_Init, NULL);
       return FALSE;
     }
+    g_live.window_visible = (window_create_flags & SDL_WINDOW_HIDDEN) == 0;
+    g_live.reveal_after_initial_refresh = !g_live.window_visible;
     g_live.window_user_sized = 0;
+    if (g_live.reveal_after_initial_refresh) {
+      rfbClientLog("ard-hp: deferring live-view show until initial layout/full refresh\n");
+    }
   } else {
     Uint32 window_flags = SDL_GetWindowFlags(g_live.window);
     int current_w = 0;
@@ -2499,7 +2602,9 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_EXPOSED:
           invalidate_live_view_runtime_size();
           refresh_live_view_layout(client);
-          g_live.pending_dynamic_resize = 1;
+          if (!ard_hp_startup_layout_pending() && g_live.synthetic_resize_events <= 0) {
+            g_live.pending_dynamic_resize = 1;
+          }
           queue_live_view_present(0, 0, client->width, client->height);
           present_live_view(client, 0, 0, client->width, client->height);
           SendFramebufferUpdateRequest(client, 0, 0,
@@ -2523,15 +2628,20 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
             g_live.synthetic_resize_events = 0;
             g_live.synthetic_resize_w = 0;
             g_live.synthetic_resize_h = 0;
-            if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
-              g_live.window_user_sized = 1;
-            }
-            g_live.pending_dynamic_resize = 1;
-            if (e->window.data1 > 0 && e->window.data1 <= 0xffff &&
-                e->window.data2 > 0 && e->window.data2 <= 0xffff) {
-              g_live.cached_runtime_w = (uint16_t)e->window.data1;
-              g_live.cached_runtime_h = (uint16_t)e->window.data2;
-              g_live.runtime_size_valid = 1;
+            if (ard_hp_startup_layout_pending()) {
+              rfbClientLog("ard-hp: ignoring pre-layout live-view resize event=%u size=%dx%d\n",
+                           (unsigned)e->window.event, e->window.data1, e->window.data2);
+            } else {
+              if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
+                g_live.window_user_sized = 1;
+              }
+              g_live.pending_dynamic_resize = 1;
+              if (e->window.data1 > 0 && e->window.data1 <= 0xffff &&
+                  e->window.data2 > 0 && e->window.data2 <= 0xffff) {
+                g_live.cached_runtime_w = (uint16_t)e->window.data1;
+                g_live.cached_runtime_h = (uint16_t)e->window.data2;
+                g_live.runtime_size_valid = 1;
+              }
             }
           }
           refresh_live_view_layout(client);
@@ -2821,25 +2931,57 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
         return FALSE;
       }
     }
-    if (client && first_display_layout) {
+    {
+      int startup_full_refresh_requested = 0;
+      if (client && first_display_layout) {
       int startup_resize_sent = 0;
+      int startup_resize_allowed = live_view_should_drive_dynamic_resize();
+      uint16_t startup_target_w = 0;
+      uint16_t startup_target_h = 0;
+      int startup_target_valid = 0;
+      if (g_live.pending_dynamic_resize || g_live.runtime_size_valid) {
+        rfbClientLog("ard-hp: clearing pre-layout dynamic resize intent pending=%d cached=%d target=%ux%u\n",
+                     g_live.pending_dynamic_resize,
+                     g_live.runtime_size_valid,
+                     (unsigned)g_live.cached_runtime_w,
+                     (unsigned)g_live.cached_runtime_h);
+      }
+      g_live.pending_dynamic_resize = 0;
+      g_live.runtime_size_valid = 0;
+      g_live.debounce_runtime_w = 0;
+      g_live.debounce_runtime_h = 0;
+      g_live.debounce_runtime_started_ms = 0;
       g_hp.initial_full_refresh_done = 0;
       g_hp.initial_full_refresh_retries = 0;
-      if (!g_live.window_user_sized) {
-        uint16_t startup_target_w = 0;
-        uint16_t startup_target_h = 0;
-        if (ard_hp_compute_dynamic_resolution_target(client, &startup_target_w, &startup_target_h) &&
-            startup_target_w != 0 && startup_target_h != 0 &&
-            ard_hp_dynamic_target_materially_diff(startup_target_w, startup_target_h,
-                                                    scaled_w, scaled_h)) {
-          g_live.last_runtime_w = startup_target_w;
-          g_live.last_runtime_h = startup_target_h;
-          if (!maybe_send_dynamic_resolution_update(client, "startup-layout", TRUE)) {
-            free(payload);
-            return FALSE;
-          }
-          startup_resize_sent = g_hp.dynamic_request_in_flight;
+      startup_target_valid = ard_hp_compute_dynamic_resolution_target(client,
+                                                                      &startup_target_w,
+                                                                      &startup_target_h) &&
+                             startup_target_w != 0 && startup_target_h != 0;
+      rfbClientLog("ard-hp: first layout startup policy user_sized=%d fullscreen_or_user=%d display=%ux%u target=%ux%u valid=%d\n",
+                   g_live.window_user_sized,
+                   startup_resize_allowed,
+                   (unsigned)scaled_w, (unsigned)scaled_h,
+                   (unsigned)startup_target_w, (unsigned)startup_target_h,
+                   startup_target_valid);
+      if (startup_resize_allowed &&
+          startup_target_valid &&
+          ard_hp_dynamic_target_materially_diff(startup_target_w, startup_target_h,
+                                                scaled_w, scaled_h)) {
+        g_live.last_runtime_w = startup_target_w;
+        g_live.last_runtime_h = startup_target_h;
+        if (!maybe_send_dynamic_resolution_update(client, "startup-layout", TRUE)) {
+          free(payload);
+          return FALSE;
         }
+        startup_resize_sent = g_hp.dynamic_request_in_flight;
+      } else {
+        const char *skip_reason = "target-matches-display";
+        if (!startup_resize_allowed) {
+          skip_reason = "startup-auto-resize-disabled";
+        } else if (!startup_target_valid) {
+          skip_reason = "no-startup-target";
+        }
+        rfbClientLog("ard-hp: skipping startup dynamic resize reason=%s\n", skip_reason);
       }
       if (!startup_resize_sent) {
         uint16_t request_w = ard_hp_request_width(client);
@@ -2848,12 +2990,13 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
           free(payload);
           return FALSE;
         }
+        startup_full_refresh_requested = 1;
       }
-    }
-    if (client && scaled_w != 0 && scaled_h != 0 &&
-        (scaled_w != prev_display_w || scaled_h != prev_display_h ||
-         ui_w != prev_backing_w || ui_h != prev_backing_h ||
-         g_hp.last_dynamic_request_w == 0 || g_hp.last_dynamic_request_h == 0)) {
+      }
+      if (client && scaled_w != 0 && scaled_h != 0 &&
+          (scaled_w != prev_display_w || scaled_h != prev_display_h ||
+           ui_w != prev_backing_w || ui_h != prev_backing_h ||
+           g_hp.last_dynamic_request_w == 0 || g_hp.last_dynamic_request_h == 0)) {
       uint16_t request_w = ard_hp_request_width(client);
       uint16_t request_h = ard_hp_request_height(client);
       uint16_t pending_target_w = g_hp.pending_dynamic_target_w;
@@ -2885,11 +3028,15 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
           g_hp.initial_full_refresh_retries = 0;
           g_hp.dynamic_refresh_queued_for_request = 1;
         }
-      } else {
+      } else if (!(first_display_layout && startup_full_refresh_requested)) {
         g_hp.pending_refresh_w = request_w;
         g_hp.pending_refresh_h = request_h;
         g_hp.initial_full_refresh_retries = 0;
+      } else {
+        rfbClientLog("ard-hp: skipping duplicate initial layout refresh %ux%u\n",
+                     (unsigned)request_w, (unsigned)request_h);
       }
+    }
     }
   }
   free(payload);
@@ -3135,6 +3282,7 @@ static void on_fb_update_done(rfbClient *client) {
       present_live_view(client, 0, 0, client->width, client->height);
     }
   }
+  if (g_runtime.live_view) maybe_reveal_live_view_after_initial_refresh(client);
   if (g_runtime.live_view) maybe_present_live_view_if_due(client, FALSE);
 #endif
 
@@ -3302,8 +3450,14 @@ int main(int argc, char **argv) {
       }
       if (!maybe_observe_dynamic_resolution_target(client, "event-loop")) break;
       if (g_live.pending_dynamic_resize) {
+        if (!live_view_dynamic_resize_stable(client)) {
+          continue;
+        }
         if (!maybe_send_dynamic_resolution_update(client, "window-event", TRUE)) break;
         g_live.pending_dynamic_resize = 0;
+        g_live.debounce_runtime_w = 0;
+        g_live.debounce_runtime_h = 0;
+        g_live.debounce_runtime_started_ms = 0;
       }
     }
 #endif
