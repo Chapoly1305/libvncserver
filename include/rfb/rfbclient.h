@@ -553,30 +553,30 @@ extern rfbBool rfbClientGetARDSessionKey(const rfbClient* client, const uint8_t 
 extern rfbBool rfbClientSetARDAuthRealm(rfbClient *client, const char *realm);
 extern rfbBool rfbClientSetARDAuthClientPrincipal(rfbClient *client, const char *principal);
 extern rfbBool rfbClientSetARDAuthServicePrincipal(rfbClient *client, const char *principal);
-extern rfbBool rfbClientConfigureAppleHP(rfbClient *client);
-extern rfbBool rfbClientRunAppleHPPrelude(rfbClient *client);
-extern rfbBool rfbClientAppleHPSendPostRekeySetEncryptionStage2(rfbClient *client);
-extern rfbBool rfbClientAppleHPEnableTransport(rfbClient *client, const uint8_t *next_key,
+extern rfbBool rfbClientConfigureARDHP(rfbClient *client);
+extern rfbBool rfbClientRunARDHPPrelude(rfbClient *client);
+extern rfbBool rfbClientARDHPSendPostRekeySetEncryptionStage2(rfbClient *client);
+extern rfbBool rfbClientARDHPEnableTransport(rfbClient *client, const uint8_t *next_key,
                                                const uint8_t *next_iv, uint32_t counter);
-extern rfbBool rfbClientAppleHPTransportActive(const rfbClient *client);
-extern uint32_t rfbClientAppleHPReceivedRecordCount(const rfbClient *client);
-extern rfbBool rfbClientAppleHPDecryptRekeyRecord(const rfbClient *client,
+extern rfbBool rfbClientARDHPTransportActive(const rfbClient *client);
+extern uint32_t rfbClientARDHPReceivedRecordCount(const rfbClient *client);
+extern rfbBool rfbClientARDHPDecryptRekeyRecord(const rfbClient *client,
                                                   const uint8_t *record, size_t len,
                                                   uint32_t *counter, uint8_t next_key[16],
                                                   uint8_t next_iv[16]);
-extern rfbBool rfbClientAppleHPSendInitialDisplayConfiguration(rfbClient *client);
-extern rfbBool rfbClientAppleHPSendRuntimeDisplayConfiguration(rfbClient *client,
+extern rfbBool rfbClientARDHPSendInitialDisplayConfiguration(rfbClient *client);
+extern rfbBool rfbClientARDHPSendRuntimeDisplayConfiguration(rfbClient *client,
                                                                uint16_t logical_w,
                                                                uint16_t logical_h,
                                                                const char *reason);
-extern void rfbClientAppleHPSetPostRekeyPixelFormat(rfbClient *client);
-extern rfbBool rfbClientAppleHPSendSetDisplayMessage(rfbClient *client);
-extern rfbBool rfbClientAppleHPSendPostAuthEncodings(rfbClient *client);
-extern rfbBool rfbClientAppleHPSendAutoPasteboardCommand(rfbClient *client, uint16_t selector);
-extern rfbBool rfbClientAppleHPSendScaleFactor(rfbClient *client, double scale);
-extern rfbBool rfbClientAppleHPSendAutoFramebufferUpdate(rfbClient *client,
+extern void rfbClientARDHPSetPostRekeyPixelFormat(rfbClient *client);
+extern rfbBool rfbClientARDHPSendSetDisplayMessage(rfbClient *client);
+extern rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client);
+extern rfbBool rfbClientARDHPSendAutoPasteboardCommand(rfbClient *client, uint16_t selector);
+extern rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale);
+extern rfbBool rfbClientARDHPSendAutoFramebufferUpdate(rfbClient *client,
                                                          uint16_t width, uint16_t height);
-extern rfbBool rfbClientAppleHPResizeFramebufferIfNeeded(rfbClient *client,
+extern rfbBool rfbClientARDHPResizeFramebufferIfNeeded(rfbClient *client,
                                                          uint16_t width, uint16_t height,
                                                          uint16_t slack);
 extern rfbBool InitialiseRFBConnection(rfbClient* client);

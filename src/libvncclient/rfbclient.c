@@ -178,21 +178,21 @@ rfbClientEncodingName(int32_t encoding)
     case rfbEncodingExtendedClipboard:
       return "ExtendedClipboard";
     case 0x0000044c:
-      return "ApplePointerRebase";
+      return "ARDPointerRebase";
     case 0x0000044d:
-      return "AppleDisplayLayoutSelector";
+      return "ARDDisplayLayoutSelector";
     case 0x00000450:
-      return "AppleCursorImage";
+      return "ARDCursorImage";
     case 0x00000451:
-      return "AppleDisplayLayout";
+      return "ARDDisplayLayout";
     case 0x00000453:
-      return "AppleVendorKeysym";
+      return "ARDVendorKeysym";
     case 0x00000455:
-      return "AppleKeyboardInputSource";
+      return "ARDKeyboardInputSource";
     case 0x00000456:
-      return "AppleDeviceInfo";
+      return "ARDDeviceInfo";
     case 0x000003f2:
-      return "AppleRFBMediaStreamMessage1";
+      return "ARDRFBMediaStreamMessage1";
     default:
       return "Unknown";
   }

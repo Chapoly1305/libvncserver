@@ -1,9 +1,9 @@
 /**
- * applehpdebug.c
+ * ardhpdebug.c
  * Debug-focused libvncclient example for macOS Screen Sharing / ARD targets.
  *
  * Usage:
- *   applehpdebug <host> [port] [seconds]
+ *   ardhpdebug <host> [port] [seconds]
  *   If `seconds` is omitted, the session runs until interrupted.
  *
  * Environment:
@@ -14,45 +14,39 @@
 
 #include <rfb/rfbclient.h>
 
-#include <CommonCrypto/CommonCryptor.h>
-#include <CommonCrypto/CommonDigest.h>
-
-#include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 
 #if defined(__has_include)
 #if __has_include(<SDL.h>)
 #include <SDL.h>
 #include <zlib.h>
-#define APPLEHPDEBUG_HAS_SDL 1
+#define ARDHPDEBUG_HAS_SDL 1
 #endif
 #endif
 
 #if !defined(NDEBUG)
-#define APPLEHPDEBUG_DEBUG_BUILD 1
+#define ARDHPDEBUG_DEBUG_BUILD 1
 #else
-#define APPLEHPDEBUG_DEBUG_BUILD 0
+#define ARDHPDEBUG_DEBUG_BUILD 0
 #endif
 
-#define APPLEHP_INFO_LOG(...) rfbClientLog(__VA_ARGS__)
-#define APPLEHP_ERROR_LOG(...) rfbClientErr(__VA_ARGS__)
-#if APPLEHPDEBUG_DEBUG_BUILD
-#define APPLEHP_DEBUG_LOG(...) rfbClientLog(__VA_ARGS__)
+#define ARDHP_INFO_LOG(...) rfbClientLog(__VA_ARGS__)
+#define ARDHP_ERROR_LOG(...) rfbClientErr(__VA_ARGS__)
+#if ARDHPDEBUG_DEBUG_BUILD
+#define ARDHP_DEBUG_LOG(...) rfbClientLog(__VA_ARGS__)
 #else
-#define APPLEHP_DEBUG_LOG(...) ((void)0)
+#define ARDHP_DEBUG_LOG(...) ((void)0)
 #endif
 
 static volatile sig_atomic_t g_stop = 0;
-struct apple_hp_frame_stats {
+struct ard_hp_frame_stats {
   unsigned long long rects;
   unsigned long long frames;
   unsigned long long pixels;
@@ -62,39 +56,24 @@ struct apple_hp_frame_stats {
   long long last_frame_ms;
 };
 
-struct apple_hp_runtime_options {
+struct ard_hp_runtime_options {
   int live_view;
   int live_view_vsync;
   int low_latency_input;
   int log_input;
-  int apple_hp_mode;
+  int ard_hp_mode;
   int live_view_overlay;
 };
 
-struct apple_hp_known_krb_realm {
+struct ard_hp_known_krb_realm {
   const char *host;
   const char *realm;
 };
 
-struct apple_hp_transport_state {
-  int active;
-  uint8_t wrap_key[16];
-  uint8_t cbc_key[16];
-  uint8_t send_iv[16];
-  uint8_t recv_iv[16];
-  uint32_t send_seq;
-  uint32_t recv_seq;
-  uint8_t *recv_buf;
-  size_t recv_len;
-  size_t recv_off;
-  size_t recv_cap;
-};
-
-struct apple_hp_session_state {
+struct ard_hp_session_state {
   int rekey_seen;
   int post_rekey_ready;
   int post_rekey_sent;
-  int post_rekey_server_records;
   int post_rekey_phase;
   int initial_full_refresh_done;
   int initial_full_refresh_retries;
@@ -122,18 +101,17 @@ struct apple_hp_session_state {
   long long dynamic_request_started_ms;
   int dynamic_request_in_flight;
   int dynamic_refresh_queued_for_request;
-  struct apple_hp_transport_state transport;
 };
 
-static struct apple_hp_frame_stats g_frame = {0};
-static struct apple_hp_runtime_options g_runtime = {0};
-static struct apple_hp_session_state g_hp = {0};
+static struct ard_hp_frame_stats g_frame = {0};
+static struct ard_hp_runtime_options g_runtime = {0};
+static struct ard_hp_session_state g_hp = {0};
 
-static const uint16_t kAppleHPFramebufferSlack = 2;
+static const uint16_t kARDHPFramebufferSlack = 2;
 
-#if defined(APPLEHPDEBUG_HAS_SDL)
-#define APPLEHPDEBUG_CURSOR_CACHE_MAX 16
-struct apple_hp_cursor_cache_entry {
+#if defined(ARDHPDEBUG_HAS_SDL)
+#define ARDHPDEBUG_CURSOR_CACHE_MAX 16
+struct ard_hp_cursor_cache_entry {
   uint32_t cache_id;
   int hot_x;
   int hot_y;
@@ -143,11 +121,13 @@ struct apple_hp_cursor_cache_entry {
   SDL_Texture *texture;
 };
 
-struct apple_hp_live_view_state {
+struct ard_hp_live_view_state {
   SDL_Texture *texture;
   SDL_Renderer *renderer;
   SDL_Window *window;
   int synthetic_resize_events;
+  int synthetic_resize_w;
+  int synthetic_resize_h;
   int window_user_sized;
   int pending_dynamic_resize;
   int runtime_size_valid;
@@ -160,11 +140,12 @@ struct apple_hp_live_view_state {
   int pending_y;
   int pending_w;
   int pending_h;
+  int awaiting_refresh_present;
   int needs_clear;
   int present_per_rect;
   long long last_present_us;
   long long last_input_us;
-  struct apple_hp_cursor_cache_entry cursor_cache[APPLEHPDEBUG_CURSOR_CACHE_MAX];
+  struct ard_hp_cursor_cache_entry cursor_cache[ARDHPDEBUG_CURSOR_CACHE_MAX];
   uint32_t cursor_current_cache_id;
   int cursor_visible;
   int button_mask;
@@ -181,9 +162,9 @@ struct apple_hp_live_view_state {
   int skip_next_fb_update;
 };
 
-static struct apple_hp_live_view_state g_live = {.needs_clear = 1};
+static struct ard_hp_live_view_state g_live = {.needs_clear = 1};
 
-struct apple_hp_live_view_geometry {
+struct ard_hp_live_view_geometry {
   SDL_Rect src;
   SDL_Rect dst;
   int output_w;
@@ -199,33 +180,41 @@ static int maybe_present_live_view_if_due(rfbClient *client, int force);
 static void note_live_view_input(void);
 static long long monotonic_us(void);
 static uint16_t read_be_u16(const uint8_t *p);
-static uint16_t apple_hp_backing_width(rfbClient *client);
-static uint16_t apple_hp_backing_height(rfbClient *client);
-static uint16_t apple_hp_display_width(rfbClient *client);
-static uint16_t apple_hp_display_height(rfbClient *client);
-static uint16_t apple_hp_request_width(rfbClient *client);
-static uint16_t apple_hp_request_height(rfbClient *client);
-static int apple_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
+static uint16_t ard_hp_backing_width(rfbClient *client);
+static uint16_t ard_hp_backing_height(rfbClient *client);
+static uint16_t ard_hp_display_width(rfbClient *client);
+static uint16_t ard_hp_display_height(rfbClient *client);
+static uint16_t ard_hp_request_width(rfbClient *client);
+static uint16_t ard_hp_request_height(rfbClient *client);
+static int ard_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
                                              const char *reason);
 static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force);
-static void draw_live_view_overlay(rfbClient *client, const struct apple_hp_live_view_geometry *geom);
-static void maybe_log_live_view_layers(rfbClient *client, const struct apple_hp_live_view_geometry *geom);
+static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_view_geometry *geom);
+static void maybe_log_live_view_layers(rfbClient *client, const struct ard_hp_live_view_geometry *geom);
+static void maybe_note_live_view_geometry_intent(rfbClient *client,
+                                                 const struct ard_hp_live_view_geometry *geom);
 #endif
 
-static int apple_hp_should_suppress_incremental(void) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+static int ard_hp_should_suppress_incremental(void) {
+#if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) return 0;
 #endif
-  return g_runtime.apple_hp_mode && g_hp.auto_fbu_active;
+  return g_runtime.ard_hp_mode && g_hp.auto_fbu_active;
 }
 
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
 static void reset_live_view_pending_present(void) {
   g_live.has_pending_present = 0;
   g_live.pending_x = 0;
   g_live.pending_y = 0;
   g_live.pending_w = 0;
   g_live.pending_h = 0;
+}
+
+static void arm_live_view_refresh_present(void) {
+  reset_live_view_pending_present();
+  g_live.awaiting_refresh_present = 1;
+  g_live.needs_clear = 1;
 }
 
 static void queue_live_view_present(int x, int y, int w, int h) {
@@ -280,6 +269,7 @@ static int maybe_present_live_view_if_due(rfbClient *client, int force) {
   long long min_interval_us = 33333;
 
   if (!g_runtime.live_view || !client || !g_live.has_pending_present) return 1;
+  if (g_live.awaiting_refresh_present) return 1;
   if (g_live.present_per_rect) return 1;
   if (!force && client->buffered > 0) return 1;
   if (!force) {
@@ -377,7 +367,7 @@ static void draw_overlay_box(SDL_Renderer *renderer, const SDL_Rect *rect,
   if (label) draw_overlay_text(renderer, rect->x + 4, rect->y + 4, label, r, g, b);
 }
 
-static void maybe_log_live_view_layers(rfbClient *client, const struct apple_hp_live_view_geometry *geom) {
+static void maybe_log_live_view_layers(rfbClient *client, const struct ard_hp_live_view_geometry *geom) {
   static int last_window_w = -1;
   static int last_window_h = -1;
   static int last_output_w = -1;
@@ -406,10 +396,10 @@ static void maybe_log_live_view_layers(rfbClient *client, const struct apple_hp_
   if (!g_runtime.live_view_overlay || !client || !geom || !geom->valid) return;
   fb_w = client->width;
   fb_h = client->height;
-  back_w = apple_hp_backing_width(client);
-  back_h = apple_hp_backing_height(client);
-  disp_w = apple_hp_display_width(client);
-  disp_h = apple_hp_display_height(client);
+  back_w = ard_hp_backing_width(client);
+  back_h = ard_hp_backing_height(client);
+  disp_w = ard_hp_display_width(client);
+  disp_h = ard_hp_display_height(client);
   if (last_window_w == geom->window_w &&
       last_window_h == geom->window_h &&
       last_output_w == geom->output_w &&
@@ -458,7 +448,7 @@ static void maybe_log_live_view_layers(rfbClient *client, const struct apple_hp_
                geom->dst.x, geom->dst.y, geom->dst.w, geom->dst.h);
 }
 
-static void draw_live_view_overlay(rfbClient *client, const struct apple_hp_live_view_geometry *geom) {
+static void draw_live_view_overlay(rfbClient *client, const struct ard_hp_live_view_geometry *geom) {
   SDL_Rect out_rect;
   SDL_Rect panel_rect;
   SDL_Rect fb_rect;
@@ -495,8 +485,8 @@ static void draw_live_view_overlay(rfbClient *client, const struct apple_hp_live
 
   fb_w = client->width > 0 ? client->width : 1;
   fb_h = client->height > 0 ? client->height : 1;
-  back_w = apple_hp_backing_width(client);
-  back_h = apple_hp_backing_height(client);
+  back_w = ard_hp_backing_width(client);
+  back_h = ard_hp_backing_height(client);
 
   if (back_w > 0 && back_h > 0) {
     back_rect.x = fb_rect.x;
@@ -540,7 +530,7 @@ static long long elapsed_us_since(long long started_us) {
 }
 
 static unsigned int main_loop_wait_usecs(void) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   long long now_us = 0;
   long long elapsed_us = 0;
   long long due_in_us = 0;
@@ -570,8 +560,33 @@ static unsigned int main_loop_wait_usecs(void) {
   return 500000;
 }
 
+static const char *ard_hp_getenv_compat(const char *name) {
+  const char *s = NULL;
+  const char *marker = NULL;
+  char legacy_name[128];
+  size_t prefix_len;
+  size_t suffix_len;
+
+  if (!name || !*name) return NULL;
+  s = getenv(name);
+  if (s && *s) return s;
+
+  marker = strstr(name, "_ARD_");
+  if (!marker) return NULL;
+
+  prefix_len = (size_t)(marker - name);
+  suffix_len = strlen(marker + 5);
+  if (prefix_len + strlen("_APPLE_") + suffix_len + 1 > sizeof(legacy_name)) return NULL;
+
+  memcpy(legacy_name, name, prefix_len);
+  memcpy(legacy_name + prefix_len, "_APPLE_", strlen("_APPLE_"));
+  memcpy(legacy_name + prefix_len + strlen("_APPLE_"), marker + 5, suffix_len + 1);
+  s = getenv(legacy_name);
+  return (s && *s) ? s : NULL;
+}
+
 static int env_flag_enabled(const char *name) {
-  const char *s = getenv(name);
+  const char *s = ard_hp_getenv_compat(name);
   if (!s || !*s) return 0;
   if (!strcmp(s, "0")) return 0;
   if (!strcmp(s, "false")) return 0;
@@ -582,7 +597,7 @@ static int env_flag_enabled(const char *name) {
 }
 
 static int env_flag_default_true(const char *name) {
-  const char *s = getenv(name);
+  const char *s = ard_hp_getenv_compat(name);
   if (!s || !*s) return 1;
   return env_flag_enabled(name);
 }
@@ -591,20 +606,20 @@ static int env_flag_default_false(const char *name) {
   return env_flag_enabled(name);
 }
 
-static const char *apple_hp_getenv_first(const char *a, const char *b) {
+static const char *ard_hp_getenv_first(const char *a, const char *b) {
   const char *s = NULL;
   if (a) {
-    s = getenv(a);
+    s = ard_hp_getenv_compat(a);
     if (s && *s) return s;
   }
   if (b) {
-    s = getenv(b);
+    s = ard_hp_getenv_compat(b);
     if (s && *s) return s;
   }
   return NULL;
 }
 
-static void apple_hp_normalize_host(const char *host, char *out, size_t out_cap) {
+static void ard_hp_normalize_host(const char *host, char *out, size_t out_cap) {
   size_t n = 0;
   const char *start = host;
   const char *end = NULL;
@@ -638,39 +653,39 @@ static void apple_hp_normalize_host(const char *host, char *out, size_t out_cap)
   out[n] = '\0';
 }
 
-static void apple_hp_seed_known_auth35_realm(const char *host) {
-  static const struct apple_hp_known_krb_realm kKnown[] = {
+static void ard_hp_seed_known_auth35_realm(const char *host) {
+  static const struct ard_hp_known_krb_realm kKnown[] = {
       {"alexs-mac-mini.local", "LKDC:SHA1.896110981E604592DBD4B2A3A0C367563A38637E"},
   };
   char normalized[512];
   size_t i;
 
   if (!host || !*host) return;
-  if (apple_hp_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM")) return;
-  if (apple_hp_getenv_first("VNC_APPLE_KRB_SERVICE_PRINCIPAL",
-                            "LIBVNCCLIENT_APPLE_KRB_SERVICE_PRINCIPAL"))
+  if (ard_hp_getenv_first("VNC_ARD_KRB_REALM", "LIBVNCCLIENT_ARD_KRB_REALM")) return;
+  if (ard_hp_getenv_first("VNC_ARD_KRB_SERVICE_PRINCIPAL",
+                            "LIBVNCCLIENT_ARD_KRB_SERVICE_PRINCIPAL"))
     return;
-  if (apple_hp_getenv_first("VNC_APPLE_KRB_CLIENT_PRINCIPAL",
-                            "LIBVNCCLIENT_APPLE_KRB_CLIENT_PRINCIPAL"))
+  if (ard_hp_getenv_first("VNC_ARD_KRB_CLIENT_PRINCIPAL",
+                            "LIBVNCCLIENT_ARD_KRB_CLIENT_PRINCIPAL"))
     return;
 
-  apple_hp_normalize_host(host, normalized, sizeof(normalized));
+  ard_hp_normalize_host(host, normalized, sizeof(normalized));
   if (!normalized[0]) return;
 
   for (i = 0; i < sizeof(kKnown) / sizeof(kKnown[0]); ++i) {
     if (strcmp(normalized, kKnown[i].host) == 0) {
-      setenv("VNC_APPLE_KRB_REALM", kKnown[i].realm, 0);
+      setenv("VNC_ARD_KRB_REALM", kKnown[i].realm, 0);
       return;
     }
   }
 }
 
-static int apple_hp_simple_1080p_enabled(void) {
-  return env_flag_enabled("VNC_APPLE_HP_SIMPLE_1080P");
+static int ard_hp_simple_1080p_enabled(void) {
+  return env_flag_enabled("VNC_ARD_HP_SIMPLE_1080P");
 }
 
-static double apple_hp_input_rect_scale(void) {
-  const char *s = getenv("VNC_APPLE_HP_INPUT_RECT_SCALE");
+static double ard_hp_input_rect_scale(void) {
+  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_INPUT_RECT_SCALE");
   char *end = NULL;
   double v;
 
@@ -680,8 +695,8 @@ static double apple_hp_input_rect_scale(void) {
   return v;
 }
 
-static int apple_hp_pointer_content_offset_x(void) {
-  const char *s = getenv("VNC_APPLE_HP_POINTER_OFFSET_X");
+static int ard_hp_pointer_content_offset_x(void) {
+  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_POINTER_OFFSET_X");
   char *end = NULL;
   long v;
 
@@ -691,8 +706,8 @@ static int apple_hp_pointer_content_offset_x(void) {
   return (int)v;
 }
 
-static int apple_hp_pointer_content_offset_y(void) {
-  const char *s = getenv("VNC_APPLE_HP_POINTER_OFFSET_Y");
+static int ard_hp_pointer_content_offset_y(void) {
+  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_POINTER_OFFSET_Y");
   char *end = NULL;
   long v;
 
@@ -702,7 +717,7 @@ static int apple_hp_pointer_content_offset_y(void) {
   return (int)v;
 }
 
-static int apple_hp_scale_coord_round(int pos, int src_extent, int dst_extent) {
+static int ard_hp_scale_coord_round(int pos, int src_extent, int dst_extent) {
   long long num;
   int src_max;
   int dst_max;
@@ -717,30 +732,6 @@ static int apple_hp_scale_coord_round(int pos, int src_extent, int dst_extent) {
   return (int)(num / (long long)dst_max);
 }
 
-static int hex_nibble(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-  return -1;
-}
-
-static size_t parse_hex_blob(const char *hex, uint8_t *out, size_t out_cap) {
-  size_t n = 0;
-  int hi = -1;
-  for (; *hex; ++hex) {
-    int v = hex_nibble(*hex);
-    if (v < 0) continue;
-    if (hi < 0) {
-      hi = v;
-      continue;
-    }
-    if (n >= out_cap) return 0;
-    out[n++] = (uint8_t)((hi << 4) | v);
-    hi = -1;
-  }
-  return (hi < 0) ? n : 0;
-}
-
 static uint16_t read_be_u16(const uint8_t *p) {
   return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
@@ -750,115 +741,8 @@ static uint32_t read_be_u32(const uint8_t *p) {
          (uint32_t)p[3];
 }
 
-static void write_be_u16(uint8_t *p, uint16_t v) {
-  p[0] = (uint8_t)((v >> 8) & 0xff);
-  p[1] = (uint8_t)(v & 0xff);
-}
-
-static void write_be_u32(uint8_t *p, uint32_t v) {
-  p[0] = (uint8_t)((v >> 24) & 0xff);
-  p[1] = (uint8_t)((v >> 16) & 0xff);
-  p[2] = (uint8_t)((v >> 8) & 0xff);
-  p[3] = (uint8_t)(v & 0xff);
-}
-
-static int wait_for_socket_io(int fd, int want_write) {
-  fd_set rfds;
-  fd_set wfds;
-
-  for (;;) {
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    if (want_write)
-      FD_SET(fd, &wfds);
-    else
-      FD_SET(fd, &rfds);
-    if (select(fd + 1, want_write ? NULL : &rfds, want_write ? &wfds : NULL, NULL, NULL) > 0)
-      return 1;
-    if (errno == EINTR) continue;
-    return 0;
-  }
-}
-
-static int raw_read_exact(rfbClient *client, void *out, size_t len) {
-  uint8_t *p = (uint8_t *)out;
-
-  if (!client) return 0;
-  while (len > 0) {
-    if (client->buffered > 0) {
-      size_t take = client->buffered < len ? client->buffered : len;
-      memcpy(p, client->bufoutptr, take);
-      client->bufoutptr += take;
-      client->buffered -= take;
-      p += take;
-      len -= take;
-      continue;
-    }
-    {
-      ssize_t n = read(client->sock, p, len);
-      if (n < 0) {
-        if (errno == EINTR) continue;
-        if ((errno == EAGAIN || errno == EWOULDBLOCK) && wait_for_socket_io(client->sock, 0))
-          continue;
-        rfbClientErr("apple-hp transport: read failed (%d: %s)\n", errno, strerror(errno));
-        return 0;
-      }
-      if (n == 0) {
-        rfbClientLog("apple-hp transport: server closed connection\n");
-        return 0;
-      }
-      p += (size_t)n;
-      len -= (size_t)n;
-    }
-  }
-  return 1;
-}
-
-static int raw_write_exact(rfbClient *client, const void *buf, size_t len) {
-  const uint8_t *p = (const uint8_t *)buf;
-
-  while (len > 0) {
-    ssize_t n = write(client->sock, p, len);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      if ((errno == EAGAIN || errno == EWOULDBLOCK) && wait_for_socket_io(client->sock, 1))
-        continue;
-      rfbClientErr("apple-hp transport: write failed (%d: %s)\n", errno, strerror(errno));
-      return 0;
-    }
-    if (n == 0) {
-      rfbClientErr("apple-hp transport: short write\n");
-      return 0;
-    }
-    p += (size_t)n;
-    len -= (size_t)n;
-  }
-  return 1;
-}
-
-static int aes_crypt(int op, int options, const uint8_t *key, const uint8_t *iv,
-                     const uint8_t *in, size_t in_len, uint8_t *out, size_t *out_len) {
-  CCCryptorStatus st;
-  size_t moved = 0;
-
-  st = CCCrypt((CCOperation)op, kCCAlgorithmAES128, (CCOptions)options, key, 16, iv,
-               in, in_len, out, in_len, &moved);
-  if (st != kCCSuccess || moved != in_len) {
-    rfbClientErr("apple-hp transport: CCCrypt failed status=%d moved=%zu expected=%zu\n",
-                 (int)st, moved, in_len);
-    return 0;
-  }
-  if (out_len) *out_len = moved;
-  return 1;
-}
-
-static int aes_ecb_decrypt_block(const uint8_t *key, const uint8_t *in, uint8_t *out) {
-  size_t out_len = 0;
-  return aes_crypt(kCCDecrypt, kCCOptionECBMode, key, NULL, in, 16, out, &out_len);
-}
-
 static int parse_u32_env(const char *name, uint32_t *out) {
-  const char *s = getenv(name);
+  const char *s = ard_hp_getenv_compat(name);
   char *end = NULL;
   unsigned long v;
   if (!s || !*s) return 0;
@@ -868,36 +752,36 @@ static int parse_u32_env(const char *name, uint32_t *out) {
   return 1;
 }
 
-static uint32_t apple_hp_dynamic_min_delta(void) {
+static uint32_t ard_hp_dynamic_min_delta(void) {
   uint32_t v = 0;
-  if (parse_u32_env("VNC_APPLE_HP_DYNAMIC_MIN_DELTA", &v) > 0 && v > 0 && v <= 0xffff)
+  if (parse_u32_env("VNC_ARD_HP_DYNAMIC_MIN_DELTA", &v) > 0 && v > 0 && v <= 0xffff)
     return v;
   return 32;
 }
 
-static uint32_t apple_hp_dynamic_timeout_ms(void) {
+static uint32_t ard_hp_dynamic_timeout_ms(void) {
   uint32_t v = 0;
-  if (parse_u32_env("VNC_APPLE_HP_DYNAMIC_TIMEOUT_MS", &v) > 0 && v > 0) return v;
+  if (parse_u32_env("VNC_ARD_HP_DYNAMIC_TIMEOUT_MS", &v) > 0 && v > 0) return v;
   return 1500;
 }
 
-static uint32_t apple_hp_visible_content_pad(void) {
+static uint32_t ard_hp_visible_content_pad(void) {
   uint32_t v = 0;
-  if (parse_u32_env("VNC_APPLE_HP_VISIBLE_PAD", &v) > 0 && v <= 256) return v;
+  if (parse_u32_env("VNC_ARD_HP_VISIBLE_PAD", &v) > 0 && v <= 256) return v;
   return 8;
 }
 
-static int apple_hp_visible_crop_enabled(void) {
+static int ard_hp_visible_crop_enabled(void) {
   /* HP backing/layout sizes are authoritative for rendering. Heuristic crop
    * detection can misclassify legitimate dark regions during startup and after
    * layout changes, which distorts the live-view aspect. Keep cropping opt-in
    * for debugging and edge cases instead of enabling it by default. */
-  return env_flag_default_false("VNC_APPLE_HP_VISIBLE_CROP");
+  return env_flag_default_false("VNC_ARD_HP_VISIBLE_CROP");
 }
 
-static int apple_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
+static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
                                                    uint16_t b_w, uint16_t b_h) {
-  uint32_t min_delta = apple_hp_dynamic_min_delta();
+  uint32_t min_delta = ard_hp_dynamic_min_delta();
   uint32_t diff_w;
   uint32_t diff_h;
 
@@ -907,96 +791,96 @@ static int apple_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
   return diff_w >= min_delta || diff_h >= min_delta;
 }
 
-static uint16_t apple_hp_content_width(rfbClient *client) {
+static uint16_t ard_hp_content_width(rfbClient *client) {
   uint32_t v = 0;
-  if (apple_hp_simple_1080p_enabled()) return 1920;
-  if (parse_u32_env("VNC_APPLE_HP_REGION_W", &v) > 0 && v <= 0xffff) return (uint16_t)v;
+  if (ard_hp_simple_1080p_enabled()) return 1920;
+  if (parse_u32_env("VNC_ARD_HP_REGION_W", &v) > 0 && v <= 0xffff) return (uint16_t)v;
   if (g_hp.display_scaled_w != 0) return g_hp.display_scaled_w;
   if (g_hp.display_ui_w != 0) return g_hp.display_ui_w;
   return client ? (uint16_t)client->width : 0;
 }
 
-static uint16_t apple_hp_content_height(rfbClient *client) {
+static uint16_t ard_hp_content_height(rfbClient *client) {
   uint32_t v = 0;
-  if (apple_hp_simple_1080p_enabled()) return 1080;
-  if (parse_u32_env("VNC_APPLE_HP_REGION_H", &v) > 0 && v <= 0xffff) return (uint16_t)v;
+  if (ard_hp_simple_1080p_enabled()) return 1080;
+  if (parse_u32_env("VNC_ARD_HP_REGION_H", &v) > 0 && v <= 0xffff) return (uint16_t)v;
   if (g_hp.display_scaled_h != 0) return g_hp.display_scaled_h;
   if (g_hp.display_ui_h != 0) return g_hp.display_ui_h;
   return client ? (uint16_t)client->height : 0;
 }
 
-static uint16_t apple_hp_backing_width(rfbClient *client) {
+static uint16_t ard_hp_backing_width(rfbClient *client) {
   if (g_hp.layout_scaled_w != 0) return g_hp.layout_scaled_w;
   if (g_hp.display_ui_w != 0) return g_hp.display_ui_w;
-  return apple_hp_content_width(client);
+  return ard_hp_content_width(client);
 }
 
-static uint16_t apple_hp_backing_height(rfbClient *client) {
+static uint16_t ard_hp_backing_height(rfbClient *client) {
   if (g_hp.layout_scaled_h != 0) return g_hp.layout_scaled_h;
   if (g_hp.display_ui_h != 0) return g_hp.display_ui_h;
-  return apple_hp_content_height(client);
+  return ard_hp_content_height(client);
 }
 
-static uint16_t apple_hp_display_width(rfbClient *client) {
-  if (apple_hp_simple_1080p_enabled()) return 1920;
+static uint16_t ard_hp_display_width(rfbClient *client) {
+  if (ard_hp_simple_1080p_enabled()) return 1920;
   if (g_hp.display_scaled_w != 0) return g_hp.display_scaled_w;
   if (g_hp.display_ui_w != 0) return g_hp.display_ui_w;
   return client ? (uint16_t)client->width : 0;
 }
 
-static uint16_t apple_hp_display_height(rfbClient *client) {
-  if (apple_hp_simple_1080p_enabled()) return 1080;
+static uint16_t ard_hp_display_height(rfbClient *client) {
+  if (ard_hp_simple_1080p_enabled()) return 1080;
   if (g_hp.display_scaled_h != 0) return g_hp.display_scaled_h;
   if (g_hp.display_ui_h != 0) return g_hp.display_ui_h;
   return client ? (uint16_t)client->height : 0;
 }
 
-static uint16_t apple_hp_request_width(rfbClient *client) {
+static uint16_t ard_hp_request_width(rfbClient *client) {
   uint32_t v = 0;
-  if (parse_u32_env("VNC_APPLE_HP_REGION_W", &v) > 0 && v <= 0xffff) return (uint16_t)v;
-  if (g_runtime.apple_hp_mode) {
-    uint16_t w = apple_hp_backing_width(client);
+  if (parse_u32_env("VNC_ARD_HP_REGION_W", &v) > 0 && v <= 0xffff) return (uint16_t)v;
+  if (g_runtime.ard_hp_mode) {
+    uint16_t w = ard_hp_backing_width(client);
     if (w != 0) return w;
   }
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  if (g_runtime.live_view && g_runtime.apple_hp_mode) {
-    uint16_t w = apple_hp_display_width(client);
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_runtime.live_view && g_runtime.ard_hp_mode) {
+    uint16_t w = ard_hp_display_width(client);
     if (w != 0) return w;
   }
 #endif
-  return apple_hp_content_width(client);
+  return ard_hp_content_width(client);
 }
 
-static uint16_t apple_hp_request_height(rfbClient *client) {
+static uint16_t ard_hp_request_height(rfbClient *client) {
   uint32_t v = 0;
-  if (parse_u32_env("VNC_APPLE_HP_REGION_H", &v) > 0 && v <= 0xffff) return (uint16_t)v;
-  if (g_runtime.apple_hp_mode) {
-    uint16_t h = apple_hp_backing_height(client);
+  if (parse_u32_env("VNC_ARD_HP_REGION_H", &v) > 0 && v <= 0xffff) return (uint16_t)v;
+  if (g_runtime.ard_hp_mode) {
+    uint16_t h = ard_hp_backing_height(client);
     if (h != 0) return h;
   }
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  if (g_runtime.live_view && g_runtime.apple_hp_mode) {
-    uint16_t h = apple_hp_display_height(client);
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_runtime.live_view && g_runtime.ard_hp_mode) {
+    uint16_t h = ard_hp_display_height(client);
     if (h != 0) return h;
   }
 #endif
-  return apple_hp_content_height(client);
+  return ard_hp_content_height(client);
 }
 
-static rfbBool apple_hp_resize_framebuffer_if_needed(rfbClient *client, uint16_t width,
+static rfbBool ard_hp_resize_framebuffer_if_needed(rfbClient *client, uint16_t width,
                                                      uint16_t height) {
   if (!client || width == 0 || height == 0) return TRUE;
   g_hp.last_backing_w = width;
   g_hp.last_backing_h = height;
-  return rfbClientAppleHPResizeFramebufferIfNeeded(client, width, height, kAppleHPFramebufferSlack);
+  return rfbClientARDHPResizeFramebufferIfNeeded(client, width, height, kARDHPFramebufferSlack);
 }
 
 static int dynamic_resolution_target_matches_display(rfbClient *client,
                                                      uint16_t target_w,
                                                      uint16_t target_h) {
   if (!client || target_w == 0 || target_h == 0) return 0;
-  return apple_hp_display_width(client) == target_w &&
-         apple_hp_display_height(client) == target_h;
+  return ard_hp_display_width(client) == target_w &&
+         ard_hp_display_height(client) == target_h;
 }
 
 static int send_runtime_display_configuration_blob(rfbClient *client,
@@ -1005,7 +889,7 @@ static int send_runtime_display_configuration_blob(rfbClient *client,
                                                    const char *reason) {
   if (!client || logical_w == 0 || logical_h == 0) return 0;
   if (dynamic_resolution_target_matches_display(client, logical_w, logical_h)) return 1;
-  if (!rfbClientAppleHPSendRuntimeDisplayConfiguration(client, logical_w, logical_h, reason)) return 0;
+  if (!rfbClientARDHPSendRuntimeDisplayConfiguration(client, logical_w, logical_h, reason)) return 0;
   g_hp.last_dynamic_request_w = logical_w;
   g_hp.last_dynamic_request_h = logical_h;
   g_hp.dynamic_request_in_flight = 1;
@@ -1013,8 +897,8 @@ static int send_runtime_display_configuration_blob(rfbClient *client,
   return 1;
 }
 
-static double apple_hp_runtime_scale_factor(void) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+static double ard_hp_runtime_scale_factor(void) {
+#if defined(ARDHPDEBUG_HAS_SDL)
   int window_w = 0;
   int window_h = 0;
   int output_w = 0;
@@ -1039,239 +923,77 @@ static double apple_hp_runtime_scale_factor(void) {
   return 1.0;
 #endif
 }
-static int apple_hp_send_post_rekey_setup(rfbClient *client);
+static int ard_hp_send_post_rekey_setup(rfbClient *client);
 
-static int apple_hp_read_next_record(rfbClient *client, struct apple_hp_transport_state *st) {
-  uint8_t hdr[2];
-  uint8_t *cipher = NULL;
-  uint8_t *plain = NULL;
-  uint16_t cipher_len;
-  uint16_t body_len;
-  size_t moved = 0;
-  uint8_t seq_be[4];
-  uint8_t digest[CC_SHA1_DIGEST_LENGTH];
-  size_t total_min;
-
-  if (!client || !st) return 0;
-  if (!raw_read_exact(client, hdr, sizeof(hdr))) return 0;
-  cipher_len = read_be_u16(hdr);
-  if (cipher_len == 0 || (cipher_len % 16) != 0) {
-    rfbClientErr("apple-hp transport: invalid ciphertext length %u\n", (unsigned)cipher_len);
-    return 0;
-  }
-
-  cipher = (uint8_t *)malloc(cipher_len);
-  plain = (uint8_t *)malloc(cipher_len);
-  if (!cipher || !plain) goto fail;
-  if (!raw_read_exact(client, cipher, cipher_len)) goto fail;
-  if (!aes_crypt(kCCDecrypt, 0, st->cbc_key, st->recv_iv, cipher, cipher_len, plain, &moved)) goto fail;
-  if (moved != cipher_len || cipher_len < 22) goto fail;
-
-  body_len = read_be_u16(plain);
-  total_min = (size_t)body_len + 22u;
-  if (total_min > cipher_len) {
-    rfbClientErr("apple-hp transport: body len %u exceeds record size %u\n",
-                 (unsigned)body_len, (unsigned)cipher_len);
-    goto fail;
-  }
-
-  write_be_u32(seq_be, st->recv_seq);
-  {
-    CC_SHA1_CTX ctx;
-    CC_SHA1_Init(&ctx);
-    CC_SHA1_Update(&ctx, seq_be, sizeof(seq_be));
-    CC_SHA1_Update(&ctx, plain, cipher_len - CC_SHA1_DIGEST_LENGTH);
-    CC_SHA1_Final(digest, &ctx);
-  }
-  if (memcmp(digest, plain + cipher_len - CC_SHA1_DIGEST_LENGTH, CC_SHA1_DIGEST_LENGTH) != 0) {
-    rfbClientErr("apple-hp transport: checksum mismatch seq=%u cipher_len=%u body_len=%u\n",
-                 st->recv_seq, (unsigned)cipher_len, (unsigned)body_len);
-    goto fail;
-  }
-
-  if (st->recv_cap < body_len) {
-    uint8_t *tmp = (uint8_t *)realloc(st->recv_buf, body_len);
-    if (!tmp) goto fail;
-    st->recv_buf = tmp;
-    st->recv_cap = body_len;
-  }
-  memcpy(st->recv_buf, plain + 2, body_len);
-  st->recv_len = body_len;
-  st->recv_off = 0;
-  memcpy(st->recv_iv, cipher + cipher_len - 16, 16);
-  st->recv_seq++;
-  if (g_hp.post_rekey_ready == 1) g_hp.post_rekey_ready = 2;
-  g_hp.post_rekey_server_records++;
-
-  free(cipher);
-  free(plain);
-  return 1;
-
-fail:
-  free(cipher);
-  free(plain);
-  return 0;
+static int configure_ard_hp_mode(rfbClient *client) {
+  if (!g_runtime.ard_hp_mode || !client) return 1;
+  return rfbClientConfigureARDHP(client);
 }
 
-static rfbBool apple_hp_transport_read(rfbClient *client, char *out, unsigned int n) {
-  struct apple_hp_transport_state *st = &g_hp.transport;
-  unsigned int copied = 0;
-
-  if (!st->active) return FALSE;
-  while (copied < n) {
-    size_t avail = st->recv_len - st->recv_off;
-    size_t want;
-
-    if (avail == 0) {
-      if (!apple_hp_read_next_record(client, st)) return FALSE;
-      avail = st->recv_len - st->recv_off;
-      if (avail == 0) return FALSE;
-    }
-
-    want = (size_t)(n - copied);
-    if (want > avail) want = avail;
-    memcpy(out + copied, st->recv_buf + st->recv_off, want);
-    st->recv_off += want;
-    copied += (unsigned int)want;
-    if (st->recv_off == st->recv_len) {
-      st->recv_off = 0;
-      st->recv_len = 0;
-    }
-  }
-  return TRUE;
+static int run_ard_hp_setup(rfbClient *client) {
+  if (!g_runtime.ard_hp_mode || !client) return 1;
+  return rfbClientRunARDHPPrelude(client);
 }
 
-static rfbBool apple_hp_transport_write(rfbClient *client, const char *buf, unsigned int n) {
-  struct apple_hp_transport_state *st = &g_hp.transport;
-  size_t plain_len;
-  size_t filler_len;
-  uint8_t *plain = NULL;
-  uint8_t *cipher = NULL;
-  uint8_t hdr[2];
-  uint8_t seq_be[4];
-  size_t moved = 0;
-
-  if (!st->active) return FALSE;
-  plain_len = ((size_t)n + 22u + 15u) & ~((size_t)15u);
-  plain = (uint8_t *)calloc(1, plain_len);
-  cipher = (uint8_t *)malloc(plain_len);
-  if (!plain || !cipher) goto fail;
-
-  write_be_u16(plain, (uint16_t)n);
-  memcpy(plain + 2, buf, n);
-  filler_len = plain_len - ((size_t)n + 2u + CC_SHA1_DIGEST_LENGTH);
-  (void)filler_len;
-  write_be_u32(seq_be, st->send_seq);
-  {
-    CC_SHA1_CTX ctx;
-    CC_SHA1_Init(&ctx);
-    CC_SHA1_Update(&ctx, seq_be, sizeof(seq_be));
-    CC_SHA1_Update(&ctx, plain, plain_len - CC_SHA1_DIGEST_LENGTH);
-    CC_SHA1_Final(plain + plain_len - CC_SHA1_DIGEST_LENGTH, &ctx);
-  }
-  if (!aes_crypt(kCCEncrypt, 0, st->cbc_key, st->send_iv, plain, plain_len, cipher, &moved)) goto fail;
-  write_be_u16(hdr, (uint16_t)moved);
-  if (!raw_write_exact(client, hdr, sizeof(hdr))) goto fail;
-  if (!raw_write_exact(client, cipher, moved)) goto fail;
-  memcpy(st->send_iv, cipher + moved - 16, 16);
-  st->send_seq++;
-
-  free(plain);
-  free(cipher);
-  return TRUE;
-
-fail:
-  free(plain);
-  free(cipher);
-  return FALSE;
-}
-
-static int apple_hp_enable_transport(rfbClient *client, const uint8_t *next_key, const uint8_t *next_iv,
-                                     uint32_t counter) {
-  struct apple_hp_transport_state *st = &g_hp.transport;
-
-  if (!client || !next_key || !next_iv) return 0;
-  memset(st, 0, sizeof(*st));
-  memcpy(st->wrap_key, next_key, 16);
-  memcpy(st->cbc_key, next_key, 16);
-  memcpy(st->send_iv, next_iv, 16);
-  memcpy(st->recv_iv, next_iv, 16);
-  st->send_seq = counter ? (counter - 1) : 0;
-  st->recv_seq = counter ? (counter - 1) : 0;
-  st->active = 1;
-  client->ReadFromTransport = apple_hp_transport_read;
-  client->WriteToTransport = apple_hp_transport_write;
-  rfbClientLog("apple-hp: enabled CBC transport counter=%u send_seq=%u recv_seq=%u\n",
-               counter, st->send_seq, st->recv_seq);
-  return 1;
-}
-
-static int configure_apple_hp_mode(rfbClient *client) {
-  if (!g_runtime.apple_hp_mode || !client) return 1;
-  return rfbClientConfigureAppleHP(client);
-}
-
-static int run_apple_hp_setup(rfbClient *client) {
-  if (!g_runtime.apple_hp_mode || !client) return 1;
-  return rfbClientRunAppleHPPrelude(client);
-}
-
-static int apple_hp_send_post_rekey_setup(rfbClient *client) {
+static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   uint16_t region_w;
   uint16_t region_h;
 
-  if (!g_runtime.apple_hp_mode || !client || g_hp.post_rekey_sent) return 1;
+  if (!g_runtime.ard_hp_mode || !client || g_hp.post_rekey_sent) return 1;
 
   if (g_hp.post_rekey_phase == 0)
-    rfbClientLog("apple-hp: sending post-rekey setup phase 1 over CBC transport\n");
+    rfbClientLog("ard-hp: sending post-rekey setup phase 1 over CBC transport\n");
   else
-    rfbClientLog("apple-hp: sending post-rekey setup phase %d over CBC transport\n",
+    rfbClientLog("ard-hp: sending post-rekey setup phase %d over CBC transport\n",
                  g_hp.post_rekey_phase + 1);
-  rfbClientAppleHPSetPostRekeyPixelFormat(client);
-  region_w = apple_hp_request_width(client);
-  region_h = apple_hp_request_height(client);
+  rfbClientARDHPSetPostRekeyPixelFormat(client);
+  region_w = ard_hp_request_width(client);
+  region_h = ard_hp_request_height(client);
   if (g_hp.post_rekey_phase == 0) {
-    if (!rfbClientAppleHPSendSetDisplayMessage(client)) return 0;
+    if (!rfbClientARDHPSendSetDisplayMessage(client)) return 0;
     if (!SendCurrentPixelFormat(client)) return 0;
     g_hp.post_rekey_phase = 2;
     return 1;
   }
   if (g_hp.post_rekey_phase == 1) g_hp.post_rekey_phase = 2;
 
-  if (!rfbClientAppleHPSendAutoPasteboardCommand(client, 1)) return 0;
-  if (!rfbClientAppleHPSendScaleFactor(client, apple_hp_runtime_scale_factor())) return 0;
+  if (!rfbClientARDHPSendAutoPasteboardCommand(client, 1)) return 0;
+  if (!rfbClientARDHPSendScaleFactor(client, ard_hp_runtime_scale_factor())) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, region_w, region_h, FALSE)) return 0;
   g_hp.initial_full_refresh_done = 0;
   g_hp.initial_full_refresh_retries = 3;
   g_hp.displayinfo2_seen = 0;
-  if (apple_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
-  rfbClientLog("apple-hp: requested initial full refresh %ux%u and queued %d retries\n",
+  if (ard_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
+  rfbClientLog("ard-hp: requested initial full refresh %ux%u and queued %d retries\n",
                (unsigned)region_w, (unsigned)region_h, g_hp.initial_full_refresh_retries);
-  if (!rfbClientAppleHPSendAutoFramebufferUpdate(client, region_w, region_h)) return 0;
+  if (!rfbClientARDHPSendAutoFramebufferUpdate(client, region_w, region_h)) return 0;
   g_hp.auto_fbu_active = 1;
   g_hp.post_rekey_phase = 3;
   g_hp.post_rekey_sent = 1;
   return 1;
 }
 
-static int apple_hp_maybe_advance_post_rekey_setup(rfbClient *client) {
-  if (!g_runtime.apple_hp_mode || !client) return 1;
-  if (g_hp.post_rekey_ready != 2 || g_hp.post_rekey_sent) return 1;
+static int ard_hp_maybe_advance_post_rekey_setup(rfbClient *client) {
+  uint32_t recv_records;
 
-  if (g_hp.post_rekey_phase == 0 && g_hp.post_rekey_server_records > 1) {
-    return apple_hp_send_post_rekey_setup(client);
+  if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (g_hp.post_rekey_ready != 2 || g_hp.post_rekey_sent) return 1;
+  recv_records = rfbClientARDHPReceivedRecordCount(client);
+
+  if (g_hp.post_rekey_phase == 0 && recv_records > 1) {
+    return ard_hp_send_post_rekey_setup(client);
   }
-  if (g_hp.post_rekey_phase == 1 && g_hp.post_rekey_server_records > 2) {
-    return apple_hp_send_post_rekey_setup(client);
+  if (g_hp.post_rekey_phase == 1 && recv_records > 2) {
+    return ard_hp_send_post_rekey_setup(client);
   }
   if (g_hp.post_rekey_phase == 2) {
-    if (!apple_hp_send_post_rekey_setup(client)) return 0;
+    if (!ard_hp_send_post_rekey_setup(client)) return 0;
     g_hp.post_rekey_ready = 0;
   }
   return 1;
 }
 
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
 struct sdl_button_map {
   int sdl;
   int rfb;
@@ -1395,10 +1117,11 @@ static void destroy_live_view(void) {
   SDL_Surface *sdl = NULL;
   int i;
   reset_live_view_pending_present();
+  g_live.awaiting_refresh_present = 0;
   invalidate_live_view_runtime_size();
   g_live.last_present_us = 0;
   g_live.needs_clear = 1;
-  for (i = 0; i < APPLEHPDEBUG_CURSOR_CACHE_MAX; ++i) {
+  for (i = 0; i < ARDHPDEBUG_CURSOR_CACHE_MAX; ++i) {
     if (g_live.cursor_cache[i].texture) {
       SDL_DestroyTexture(g_live.cursor_cache[i].texture);
       g_live.cursor_cache[i].texture = NULL;
@@ -1431,13 +1154,13 @@ static void destroy_live_view(void) {
 }
 
 static void live_view_target_size(rfbClient *client, int *out_w, int *out_h);
-static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_view_geometry *geom);
+static int compute_live_view_geometry(rfbClient *client, struct ard_hp_live_view_geometry *geom);
 static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
 static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force);
-static int apple_hp_dynamic_resize_ready(rfbClient *client);
+static int ard_hp_dynamic_resize_ready(rfbClient *client);
 
 static void reset_live_view_crop(void) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   g_live.crop_x = 0;
   g_live.crop_y = 0;
   g_live.crop_w = 0;
@@ -1450,10 +1173,10 @@ static void reset_live_view_crop(void) {
 #endif
 }
 
-static struct apple_hp_cursor_cache_entry *find_cursor_cache_entry(uint32_t cache_id) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+static struct ard_hp_cursor_cache_entry *find_cursor_cache_entry(uint32_t cache_id) {
+#if defined(ARDHPDEBUG_HAS_SDL)
   int i;
-  for (i = 0; i < APPLEHPDEBUG_CURSOR_CACHE_MAX; ++i) {
+  for (i = 0; i < ARDHPDEBUG_CURSOR_CACHE_MAX; ++i) {
     if (g_live.cursor_cache[i].cache_id == cache_id) return &g_live.cursor_cache[i];
   }
 #else
@@ -1462,12 +1185,12 @@ static struct apple_hp_cursor_cache_entry *find_cursor_cache_entry(uint32_t cach
   return NULL;
 }
 
-static struct apple_hp_cursor_cache_entry *alloc_cursor_cache_entry(uint32_t cache_id) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+static struct ard_hp_cursor_cache_entry *alloc_cursor_cache_entry(uint32_t cache_id) {
+#if defined(ARDHPDEBUG_HAS_SDL)
   int i;
-  struct apple_hp_cursor_cache_entry *entry = find_cursor_cache_entry(cache_id);
+  struct ard_hp_cursor_cache_entry *entry = find_cursor_cache_entry(cache_id);
   if (entry) return entry;
-  for (i = 0; i < APPLEHPDEBUG_CURSOR_CACHE_MAX; ++i) {
+  for (i = 0; i < ARDHPDEBUG_CURSOR_CACHE_MAX; ++i) {
     if (g_live.cursor_cache[i].cache_id == 0) {
       g_live.cursor_cache[i].cache_id = cache_id;
       return &g_live.cursor_cache[i];
@@ -1559,11 +1282,11 @@ static int inflate_cursor_payload(const uint8_t *src, uint32_t src_len, uint8_t 
   return 0;
 }
 
-static int apple_hp_dump_cursor_bmp_enabled(void) {
-  return env_flag_enabled("VNC_APPLE_HP_DUMP_CURSOR_BMP");
+static int ard_hp_dump_cursor_bmp_enabled(void) {
+  return env_flag_enabled("VNC_ARD_HP_DUMP_CURSOR_BMP");
 }
 
-static void apple_hp_log_cursor_fingerprint(uint32_t cache_id, int width, int height,
+static void ard_hp_log_cursor_fingerprint(uint32_t cache_id, int width, int height,
                                             int hot_x, int hot_y, const uint8_t *argb,
                                             size_t argb_len) {
   uLong crc = crc32(0L, Z_NULL, 0);
@@ -1584,25 +1307,25 @@ static void apple_hp_log_cursor_fingerprint(uint32_t cache_id, int width, int he
   (void)nonzero_alpha;
 }
 
-static void apple_hp_maybe_dump_cursor_bmp(uint32_t cache_id, int width, int height,
+static void ard_hp_maybe_dump_cursor_bmp(uint32_t cache_id, int width, int height,
                                            uint8_t *argb) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   SDL_Surface *surface;
   char path[256];
 
-  if (!apple_hp_dump_cursor_bmp_enabled() || !argb || width <= 0 || height <= 0) return;
+  if (!ard_hp_dump_cursor_bmp_enabled() || !argb || width <= 0 || height <= 0) return;
   surface = SDL_CreateRGBSurfaceFrom(argb, width, height, 32, width * 4,
                                      0x0000ff00u, 0x00ff0000u, 0xff000000u, 0x000000ffu);
   if (!surface) {
-    rfbClientErr("apple-hp: CursorImage dump failed cache=%u: SDL_CreateRGBSurfaceFrom: %s\n",
+    rfbClientErr("ard-hp: CursorImage dump failed cache=%u: SDL_CreateRGBSurfaceFrom: %s\n",
                  cache_id, SDL_GetError());
     return;
   }
-  snprintf(path, sizeof(path), "/tmp/applehpdebug-cursor-%u.bmp", cache_id);
+  snprintf(path, sizeof(path), "/tmp/ardhpdebug-cursor-%u.bmp", cache_id);
   if (SDL_SaveBMP(surface, path) == 0) {
-    rfbClientLog("apple-hp: CursorImage dump cache=%u path=%s\n", cache_id, path);
+    rfbClientLog("ard-hp: CursorImage dump cache=%u path=%s\n", cache_id, path);
   } else {
-    rfbClientErr("apple-hp: CursorImage dump failed cache=%u path=%s err=%s\n",
+    rfbClientErr("ard-hp: CursorImage dump failed cache=%u path=%s err=%s\n",
                  cache_id, path, SDL_GetError());
   }
   SDL_FreeSurface(surface);
@@ -1614,11 +1337,11 @@ static void apple_hp_maybe_dump_cursor_bmp(uint32_t cache_id, int width, int hei
 #endif
 }
 
-static int apple_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int hot_x, int hot_y,
+static int ard_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int hot_x, int hot_y,
                                        int width, int height, const uint8_t *payload,
                                        uint32_t payload_len) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  struct apple_hp_cursor_cache_entry *entry;
+#if defined(ARDHPDEBUG_HAS_SDL)
+  struct ard_hp_cursor_cache_entry *entry;
   size_t packed_len;
   uint8_t *packed = NULL;
   uint8_t *argb = NULL;
@@ -1695,8 +1418,8 @@ static int apple_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int
   entry->hot_y = hot_y;
   entry->width = width;
   entry->height = height;
-  apple_hp_log_cursor_fingerprint(cache_id, width, height, hot_x, hot_y, argb, pixel_count * 4u);
-  apple_hp_maybe_dump_cursor_bmp(cache_id, width, height, argb);
+  ard_hp_log_cursor_fingerprint(cache_id, width, height, hot_x, hot_y, argb, pixel_count * 4u);
+  ard_hp_maybe_dump_cursor_bmp(cache_id, width, height, argb);
   g_live.cursor_current_cache_id = cache_id;
   g_live.cursor_visible = 1;
   free(packed);
@@ -1715,8 +1438,8 @@ static int apple_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int
 }
 
 static void refresh_live_view_layout(rfbClient *client) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  struct apple_hp_live_view_geometry geom;
+#if defined(ARDHPDEBUG_HAS_SDL)
+  struct ard_hp_live_view_geometry geom;
   int view_width = 1;
   int view_height = 1;
   int current_w = 0;
@@ -1734,6 +1457,8 @@ static void refresh_live_view_layout(rfbClient *client) {
       !g_live.window_user_sized &&
       (current_w != view_width || current_h != view_height)) {
     g_live.synthetic_resize_events += 2;
+    g_live.synthetic_resize_w = view_width;
+    g_live.synthetic_resize_h = view_height;
     SDL_SetWindowSize(g_live.window, view_width, view_height);
     invalidate_live_view_runtime_size();
   }
@@ -1747,13 +1472,26 @@ static void refresh_live_view_layout(rfbClient *client) {
 }
 
 static void invalidate_live_view_runtime_size(void) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   g_live.runtime_size_valid = 0;
 #endif
 }
 
+static int live_view_event_matches_synthetic_resize(const SDL_Event *e) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (!e || e->type != SDL_WINDOWEVENT) return 0;
+  if (g_live.synthetic_resize_events <= 0) return 0;
+  if (g_live.synthetic_resize_w <= 0 || g_live.synthetic_resize_h <= 0) return 1;
+  return e->window.data1 == g_live.synthetic_resize_w &&
+         e->window.data2 == g_live.synthetic_resize_h;
+#else
+  (void)e;
+  return 0;
+#endif
+}
+
 static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   int window_w = 0;
   int window_h = 0;
   int output_w = 0;
@@ -1761,6 +1499,8 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   int display_index = 0;
   int w = 0;
   int h = 0;
+  int measured_w = 0;
+  int measured_h = 0;
   Uint32 window_flags = 0;
   SDL_Rect bounds;
 
@@ -1817,6 +1557,23 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   if (w <= 0 || h <= 0) {
     live_view_target_size(client, &w, &h);
   }
+  measured_w = w;
+  measured_h = h;
+  if (g_live.pending_dynamic_resize &&
+      g_live.runtime_size_valid &&
+      g_live.cached_runtime_w > 0 &&
+      g_live.cached_runtime_h > 0) {
+    uint16_t display_w = ard_hp_display_width(client);
+    uint16_t display_h = ard_hp_display_height(client);
+    if (measured_w <= 0 || measured_h <= 0 ||
+        !ard_hp_dynamic_target_materially_diff((uint16_t)measured_w,
+                                               (uint16_t)measured_h,
+                                               display_w,
+                                               display_h)) {
+      w = g_live.cached_runtime_w;
+      h = g_live.cached_runtime_h;
+    }
+  }
   if (w <= 0 || h <= 0) return 0;
   if (w > 0xffff) w = 0xffff;
   if (h > 0xffff) h = 0xffff;
@@ -1834,7 +1591,7 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
 #endif
 }
 
-static int apple_hp_compute_dynamic_resolution_target(rfbClient *client,
+static int ard_hp_compute_dynamic_resolution_target(rfbClient *client,
                                                       uint16_t *out_w,
                                                       uint16_t *out_h) {
   uint16_t target_w = 0;
@@ -1849,9 +1606,9 @@ static int apple_hp_compute_dynamic_resolution_target(rfbClient *client,
   return 1;
 }
 
-static int apple_hp_dynamic_resize_ready(rfbClient *client) {
-  if (!client || !g_runtime.live_view || !g_runtime.apple_hp_mode) return 0;
-  if (!g_hp.rekey_seen || !g_hp.transport.active) return 0;
+static int ard_hp_dynamic_resize_ready(rfbClient *client) {
+  if (!client || !g_runtime.live_view || !g_runtime.ard_hp_mode) return 0;
+  if (!g_hp.rekey_seen || !rfbClientARDHPTransportActive(client)) return 0;
   if (!g_hp.post_rekey_sent || g_hp.post_rekey_ready != 0) return 0;
   if (!g_hp.displayinfo2_seen) return 0;
   if (!g_hp.initial_full_refresh_done) return 0;
@@ -1859,7 +1616,7 @@ static int apple_hp_dynamic_resize_ready(rfbClient *client) {
 }
 
 static int live_view_should_drive_dynamic_resize(void) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   Uint32 window_flags = 0;
 
   if (!g_runtime.live_view || !g_live.window) return 0;
@@ -1874,20 +1631,59 @@ static int live_view_should_drive_dynamic_resize(void) {
 #endif
 }
 
-static void apple_hp_clear_pending_dynamic_target(void) {
+static void maybe_note_live_view_geometry_intent(rfbClient *client,
+                                                 const struct ard_hp_live_view_geometry *geom) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  uint16_t target_w;
+  uint16_t target_h;
+  uint16_t display_w;
+  uint16_t display_h;
+
+  if (!client || !geom || !geom->valid) return;
+  if (!g_runtime.live_view || !g_runtime.ard_hp_mode) return;
+  if (!live_view_should_drive_dynamic_resize()) return;
+  if (geom->window_w <= 0 || geom->window_h <= 0) return;
+  if (geom->window_w > 0xffff || geom->window_h > 0xffff) return;
+
+  target_w = (uint16_t)geom->window_w;
+  target_h = (uint16_t)geom->window_h;
+  display_w = ard_hp_display_width(client);
+  display_h = ard_hp_display_height(client);
+  if (!ard_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) return;
+
+  if (g_live.pending_dynamic_resize &&
+      g_live.runtime_size_valid &&
+      g_live.cached_runtime_w == target_w &&
+      g_live.cached_runtime_h == target_h) {
+    return;
+  }
+
+  g_live.cached_runtime_w = target_w;
+  g_live.cached_runtime_h = target_h;
+  g_live.runtime_size_valid = 1;
+  g_live.pending_dynamic_resize = 1;
+  rfbClientLog("ard-hp: observed live-view geometry intent %ux%u\n",
+               (unsigned)target_w, (unsigned)target_h);
+#else
+  (void)client;
+  (void)geom;
+#endif
+}
+
+static void ard_hp_clear_pending_dynamic_target(void) {
   g_hp.pending_dynamic_target_w = 0;
   g_hp.pending_dynamic_target_h = 0;
 }
 
-static void apple_hp_set_pending_dynamic_target(uint16_t target_w, uint16_t target_h,
+static void ard_hp_set_pending_dynamic_target(uint16_t target_w, uint16_t target_h,
                                                 const char *reason) {
   g_hp.pending_dynamic_target_w = target_w;
   g_hp.pending_dynamic_target_h = target_h;
-  rfbClientLog("apple-hp: queued dynamic target %ux%u while request in flight (%s)\n",
+  rfbClientLog("ard-hp: queued dynamic target %ux%u while request in flight (%s)\n",
                (unsigned)target_w, (unsigned)target_h, reason ? reason : "unspecified");
 }
 
-static void apple_hp_clear_dynamic_request_state(int clear_last_request) {
+static void ard_hp_clear_dynamic_request_state(int clear_last_request) {
   g_hp.dynamic_request_in_flight = 0;
   g_hp.dynamic_refresh_queued_for_request = 0;
   g_hp.dynamic_request_started_ms = 0;
@@ -1900,18 +1696,24 @@ static void apple_hp_clear_dynamic_request_state(int clear_last_request) {
 static int maybe_observe_dynamic_resolution_target(rfbClient *client, const char *reason) {
   uint16_t target_w = 0;
   uint16_t target_h = 0;
+  uint16_t display_w = 0;
+  uint16_t display_h = 0;
 
-  if (!client || !g_runtime.live_view || !g_runtime.apple_hp_mode) return 1;
-  if (!live_view_should_drive_dynamic_resize()) return 1;
-  if (apple_hp_display_width(client) == 0 || apple_hp_display_height(client) == 0) return 1;
-  if (!apple_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
+  if (!client || !g_runtime.live_view || !g_runtime.ard_hp_mode) return 1;
+  if (ard_hp_display_width(client) == 0 || ard_hp_display_height(client) == 0) return 1;
+  if (!ard_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
   if (target_w == 0 || target_h == 0) return 1;
+  display_w = ard_hp_display_width(client);
+  display_h = ard_hp_display_height(client);
+  if (!ard_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) {
+    return 1;
+  }
   if (target_w == g_live.last_runtime_w &&
       target_h == g_live.last_runtime_h) {
     return 1;
   }
-  if (!apple_hp_dynamic_resize_ready(client)) return 1;
-  rfbClientLog("apple-hp: observed viewport intent %ux%u (%s)\n",
+  if (!ard_hp_dynamic_resize_ready(client)) return 1;
+  rfbClientLog("ard-hp: observed viewport intent %ux%u (%s)\n",
                (unsigned)target_w, (unsigned)target_h, reason ? reason : "unspecified");
   return maybe_send_dynamic_resolution_update(client, reason, FALSE);
 }
@@ -1922,16 +1724,15 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   uint16_t display_w = 0;
   uint16_t display_h = 0;
 
-  if (!client || !g_runtime.live_view || !g_runtime.apple_hp_mode) return 1;
-  if (!force && !apple_hp_dynamic_resize_ready(client)) return 1;
-  if (!force && !live_view_should_drive_dynamic_resize()) return 1;
-  if (!g_hp.rekey_seen || !g_hp.transport.active) return 1;
-  if (!apple_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
+  if (!client || !g_runtime.live_view || !g_runtime.ard_hp_mode) return 1;
+  if (!force && !ard_hp_dynamic_resize_ready(client)) return 1;
+  if (!g_hp.rekey_seen || !rfbClientARDHPTransportActive(client)) return 1;
+  if (!ard_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
   if (target_w == 0 || target_h == 0) return 1;
-  display_w = apple_hp_display_width(client);
-  display_h = apple_hp_display_height(client);
+  display_w = ard_hp_display_width(client);
+  display_h = ard_hp_display_height(client);
   if (!force &&
-      !apple_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) {
+      !ard_hp_dynamic_target_materially_diff(target_w, target_h, display_w, display_h)) {
     g_live.last_runtime_w = target_w;
     g_live.last_runtime_h = target_h;
     return 1;
@@ -1939,7 +1740,7 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   if (dynamic_resolution_target_matches_display(client, target_w, target_h)) {
     g_live.last_runtime_w = target_w;
     g_live.last_runtime_h = target_h;
-    apple_hp_clear_pending_dynamic_target();
+    ard_hp_clear_pending_dynamic_target();
     return 1;
   }
   if (g_hp.dynamic_request_in_flight) {
@@ -1952,7 +1753,7 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
         g_hp.pending_dynamic_target_h == target_h) {
       return 1;
     }
-    apple_hp_set_pending_dynamic_target(target_w, target_h, reason);
+    ard_hp_set_pending_dynamic_target(target_w, target_h, reason);
     g_live.last_runtime_w = target_w;
     g_live.last_runtime_h = target_h;
     return 1;
@@ -1966,27 +1767,27 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   g_hp.dynamic_request_started_ms = monotonic_ms();
   g_live.last_runtime_w = target_w;
   g_live.last_runtime_h = target_h;
-  apple_hp_clear_pending_dynamic_target();
+  ard_hp_clear_pending_dynamic_target();
   return 1;
 }
 
-static int apple_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
+static int ard_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
   long long elapsed_ms = 0;
 
   if (!client || !g_hp.dynamic_request_in_flight) return 1;
   if (g_hp.dynamic_request_started_ms <= 0) return 1;
   elapsed_ms = monotonic_ms() - g_hp.dynamic_request_started_ms;
-  if (elapsed_ms < 0 || (uint32_t)elapsed_ms < apple_hp_dynamic_timeout_ms()) return 1;
+  if (elapsed_ms < 0 || (uint32_t)elapsed_ms < ard_hp_dynamic_timeout_ms()) return 1;
 
-  rfbClientLog("apple-hp: dynamic request %ux%u timed out after %lld ms\n",
+  rfbClientLog("ard-hp: dynamic request %ux%u timed out after %lld ms\n",
                (unsigned)g_hp.last_dynamic_request_w,
                (unsigned)g_hp.last_dynamic_request_h,
                elapsed_ms);
-  apple_hp_clear_dynamic_request_state(TRUE);
+  ard_hp_clear_dynamic_request_state(TRUE);
   if (g_hp.pending_dynamic_target_w != 0 && g_hp.pending_dynamic_target_h != 0) {
     uint16_t pending_w = g_hp.pending_dynamic_target_w;
     uint16_t pending_h = g_hp.pending_dynamic_target_h;
-    apple_hp_clear_pending_dynamic_target();
+    ard_hp_clear_pending_dynamic_target();
     g_live.last_runtime_w = pending_w;
     g_live.last_runtime_h = pending_h;
     return maybe_send_dynamic_resolution_update(client, "dynamic-timeout", TRUE);
@@ -1997,8 +1798,8 @@ static int apple_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
   return 1;
 }
 
-static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_view_geometry *geom) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+static int compute_live_view_geometry(rfbClient *client, struct ard_hp_live_view_geometry *geom) {
+#if defined(ARDHPDEBUG_HAS_SDL)
   int display_w = 0;
   int display_h = 0;
   int fit_w = 0;
@@ -2011,9 +1812,9 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
   if (SDL_GetRendererOutputSize(g_live.renderer, &geom->output_w, &geom->output_h) < 0) return 0;
   if (geom->output_w <= 0 || geom->output_h <= 0) return 0;
 
-  display_w = apple_hp_display_width(client);
-  display_h = apple_hp_display_height(client);
-  if (g_runtime.apple_hp_mode && apple_hp_backing_width(client) > 0 && apple_hp_backing_height(client) > 0) {
+  display_w = ard_hp_display_width(client);
+  display_h = ard_hp_display_height(client);
+  if (g_runtime.ard_hp_mode && ard_hp_backing_width(client) > 0 && ard_hp_backing_height(client) > 0) {
     if (g_hp.visible_content_valid &&
         g_hp.visible_content_w > 0 && g_hp.visible_content_h > 0 &&
         g_hp.visible_content_x >= 0 && g_hp.visible_content_y >= 0 &&
@@ -2026,8 +1827,8 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
     } else {
       geom->src.x = 0;
       geom->src.y = 0;
-      geom->src.w = apple_hp_backing_width(client);
-      geom->src.h = apple_hp_backing_height(client);
+      geom->src.w = ard_hp_backing_width(client);
+      geom->src.h = ard_hp_backing_height(client);
     }
   } else {
     geom->src.x = g_live.crop_x;
@@ -2044,8 +1845,8 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
     geom->src.w = client->width > 0 ? client->width : 1;
     geom->src.h = client->height > 0 ? client->height : 1;
   }
-  if (g_runtime.apple_hp_mode && geom->src.w > 0 && geom->src.h > 0) {
-    /* Fit using the actual sampled backing/source rectangle. Apple HP often
+  if (g_runtime.ard_hp_mode && geom->src.w > 0 && geom->src.h > 0) {
+    /* Fit using the actual sampled backing/source rectangle. ARD HP often
      * reports logical display dimensions that differ slightly from the backing
      * it actually returns (for example 1616x1010 vs 3211x2007). Using the
      * logical size for presentation introduces small bars and makes the source
@@ -2079,7 +1880,7 @@ static int compute_live_view_geometry(rfbClient *client, struct apple_hp_live_vi
 #endif
 }
 
-static void apple_hp_fit_rect_inside(SDL_Rect outer, int inner_w, int inner_h, SDL_Rect *out) {
+static void ard_hp_fit_rect_inside(SDL_Rect outer, int inner_w, int inner_h, SDL_Rect *out) {
   int fit_w = outer.w;
   int fit_h = outer.h;
 
@@ -2101,8 +1902,8 @@ static void apple_hp_fit_rect_inside(SDL_Rect outer, int inner_w, int inner_h, S
   out->y = outer.y + (outer.h - fit_h) / 2;
 }
 
-static void apple_hp_control_rect_for_geometry(rfbClient *client,
-                                               const struct apple_hp_live_view_geometry *geom,
+static void ard_hp_control_rect_for_geometry(rfbClient *client,
+                                               const struct ard_hp_live_view_geometry *geom,
                                                SDL_Rect *out) {
   double scale;
   int scaled_w;
@@ -2112,7 +1913,7 @@ static void apple_hp_control_rect_for_geometry(rfbClient *client,
   memset(out, 0, sizeof(*out));
   if (!geom || !geom->valid) return;
   *out = geom->dst;
-  scale = apple_hp_input_rect_scale();
+  scale = ard_hp_input_rect_scale();
   if (scale == 1.0) return;
   scaled_w = (int)((double)geom->dst.w * scale + 0.5);
   scaled_h = (int)((double)geom->dst.h * scale + 0.5);
@@ -2131,7 +1932,7 @@ static int clamp_int(int value, int min_value, int max_value) {
 }
 
 static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *out_x, int *out_y) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   int window_w = 0;
   int window_h = 0;
   int output_w = 0;
@@ -2144,7 +1945,7 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
   int display_y = in_y;
   int rel_x = 0;
   int rel_y = 0;
-  struct apple_hp_live_view_geometry geom;
+  struct ard_hp_live_view_geometry geom;
   SDL_Rect control_rect;
   SDL_Rect input_rect;
   int display_w = 0;
@@ -2159,17 +1960,17 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
   if (g_live.window) SDL_GetWindowSize(g_live.window, &window_w, &window_h);
   if (g_live.renderer) SDL_GetRendererOutputSize(g_live.renderer, &output_w, &output_h);
   if (window_w > 0 && output_w > 0)
-    output_x = apple_hp_scale_coord_round(in_x, output_w, window_w);
+    output_x = ard_hp_scale_coord_round(in_x, output_w, window_w);
   if (window_h > 0 && output_h > 0)
-    output_y = apple_hp_scale_coord_round(in_y, output_h, window_h);
+    output_y = ard_hp_scale_coord_round(in_y, output_h, window_h);
 
   memset(&geom, 0, sizeof(geom));
   if (compute_live_view_geometry(client, &geom) && geom.valid &&
       geom.src.w > 0 && geom.src.h > 0 && geom.dst.w > 0 && geom.dst.h > 0) {
-    display_w = apple_hp_display_width(client);
-    display_h = apple_hp_display_height(client);
-    backing_w = apple_hp_backing_width(client);
-    backing_h = apple_hp_backing_height(client);
+    display_w = ard_hp_display_width(client);
+    display_h = ard_hp_display_height(client);
+    backing_w = ard_hp_backing_width(client);
+    backing_h = ard_hp_backing_height(client);
     memset(&control_rect, 0, sizeof(control_rect));
     memset(&input_rect, 0, sizeof(input_rect));
     rel_x = output_x - geom.dst.x;
@@ -2181,26 +1982,26 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
     g_live.pointer_draw_x = output_x;
     g_live.pointer_draw_y = output_y;
     used_simple_scale = 1;
-    if (g_runtime.apple_hp_mode &&
+    if (g_runtime.ard_hp_mode &&
         g_hp.visible_content_valid &&
         geom.src.w > 0 && geom.src.h > 0) {
-      int backing_x = geom.src.x + apple_hp_scale_coord_round(rel_x, geom.src.w, geom.dst.w);
-      int backing_y = geom.src.y + apple_hp_scale_coord_round(rel_y, geom.src.h, geom.dst.h);
+      int backing_x = geom.src.x + ard_hp_scale_coord_round(rel_x, geom.src.w, geom.dst.w);
+      int backing_y = geom.src.y + ard_hp_scale_coord_round(rel_y, geom.src.h, geom.dst.h);
       if (display_w > 0 && display_h > 0 && backing_w > 0 && backing_h > 0) {
-        display_x = apple_hp_scale_coord_round(backing_x, display_w, backing_w);
-        display_y = apple_hp_scale_coord_round(backing_y, display_h, backing_h);
+        display_x = ard_hp_scale_coord_round(backing_x, display_w, backing_w);
+        display_y = ard_hp_scale_coord_round(backing_y, display_h, backing_h);
       } else {
         display_x = backing_x;
         display_y = backing_y;
       }
       region_hit = 1;
-    } else if (g_runtime.apple_hp_mode && display_w > 0 && display_h > 0) {
-      display_x = apple_hp_scale_coord_round(rel_x, display_w, geom.dst.w);
-      display_y = apple_hp_scale_coord_round(rel_y, display_h, geom.dst.h);
+    } else if (g_runtime.ard_hp_mode && display_w > 0 && display_h > 0) {
+      display_x = ard_hp_scale_coord_round(rel_x, display_w, geom.dst.w);
+      display_y = ard_hp_scale_coord_round(rel_y, display_h, geom.dst.h);
       region_hit = 1;
     } else {
-      display_x = geom.src.x + apple_hp_scale_coord_round(rel_x, geom.src.w, geom.dst.w);
-      display_y = geom.src.y + apple_hp_scale_coord_round(rel_y, geom.src.h, geom.dst.h);
+      display_x = geom.src.x + ard_hp_scale_coord_round(rel_x, geom.src.w, geom.dst.w);
+      display_y = geom.src.y + ard_hp_scale_coord_round(rel_y, geom.src.h, geom.dst.h);
     }
     mapped_x = display_x;
     mapped_y = display_y;
@@ -2217,7 +2018,7 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
 
   if (mapped_x < 0) mapped_x = 0;
   if (mapped_y < 0) mapped_y = 0;
-  if (g_runtime.apple_hp_mode && display_w > 0 && display_h > 0) {
+  if (g_runtime.ard_hp_mode && display_w > 0 && display_h > 0) {
     if (mapped_x >= display_w) mapped_x = display_w - 1;
     if (mapped_y >= display_h) mapped_y = display_h - 1;
   } else {
@@ -2235,7 +2036,7 @@ done:
 #endif
 }
 
-static void apple_hp_pointer_send_coords(rfbClient *client,
+static void ard_hp_pointer_send_coords(rfbClient *client,
                                          int logical_x,
                                          int logical_y,
                                          int *out_x,
@@ -2254,15 +2055,15 @@ static void apple_hp_pointer_send_coords(rfbClient *client,
     return;
   }
 
-  display_w = apple_hp_display_width(client);
-  display_h = apple_hp_display_height(client);
-  backing_w = apple_hp_backing_width(client);
-  backing_h = apple_hp_backing_height(client);
+  display_w = ard_hp_display_width(client);
+  display_h = ard_hp_display_height(client);
+  backing_w = ard_hp_backing_width(client);
+  backing_h = ard_hp_backing_height(client);
 
   /* After live dynamic-resolution reconfiguration, the remote starts sending a
    * downsized backing surface. In that mode, the old fixed 2x Retina send path
    * overshoots; logical desktop coordinates track the remote pointer correctly. */
-  if (g_runtime.apple_hp_mode &&
+  if (g_runtime.ard_hp_mode &&
       g_hp.last_dynamic_request_w > 0 &&
       g_hp.last_dynamic_request_h > 0 &&
       display_w > 0 && display_h > 0 &&
@@ -2279,30 +2080,30 @@ static void apple_hp_pointer_send_coords(rfbClient *client,
 static void live_view_target_size(rfbClient *client, int *out_w, int *out_h) {
   int fb_w = client && client->width > 0 ? client->width : 1;
   int fb_h = client && client->height > 0 ? client->height : 1;
-  int display_w = client ? apple_hp_display_width(client) : 0;
-  int display_h = client ? apple_hp_display_height(client) : 0;
+  int display_w = client ? ard_hp_display_width(client) : 0;
+  int display_h = client ? ard_hp_display_height(client) : 0;
   int w = fb_w;
   int h = fb_h;
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   SDL_Rect usable_bounds;
 #endif
 
-  if (apple_hp_simple_1080p_enabled()) {
+  if (ard_hp_simple_1080p_enabled()) {
     w = 1920;
     h = 1080;
-  } else if (g_runtime.apple_hp_mode && display_w > 0 && display_h > 0) {
+  } else if (g_runtime.ard_hp_mode && display_w > 0 && display_h > 0) {
     w = display_w;
     h = display_h;
   } else if (g_live.crop_w > 0 && g_live.crop_h > 0) {
     w = g_live.crop_w;
     h = g_live.crop_h;
-  } else if (g_runtime.apple_hp_mode && client && fb_w <= 1 && fb_h <= 1) {
+  } else if (g_runtime.ard_hp_mode && client && fb_w <= 1 && fb_h <= 1) {
     w = display_w;
     h = display_h;
   }
 
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  if (!apple_hp_simple_1080p_enabled() &&
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (!ard_hp_simple_1080p_enabled() &&
       w > 0 && h > 0 && SDL_GetDisplayUsableBounds(0, &usable_bounds) == 0 &&
       usable_bounds.w > 0 && usable_bounds.h > 0) {
     if (w > usable_bounds.w || h > usable_bounds.h) {
@@ -2325,7 +2126,7 @@ static void live_view_target_size(rfbClient *client, int *out_w, int *out_h) {
 }
 
 static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int updated_h) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   uint32_t *fb = NULL;
   int fb_w, fb_h, region_w, region_h;
   int left, right, top, bottom;
@@ -2334,7 +2135,7 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
 
   if (!g_runtime.live_view || !client || !client->frameBuffer) return;
   if (client->format.bitsPerPixel != 32) return;
-  if (g_runtime.apple_hp_mode && !apple_hp_visible_crop_enabled()) {
+  if (g_runtime.ard_hp_mode && !ard_hp_visible_crop_enabled()) {
     if (g_hp.visible_content_valid) {
       g_hp.visible_content_valid = 0;
       g_hp.visible_content_x = 0;
@@ -2347,9 +2148,9 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
 
   fb_w = client->width;
   fb_h = client->height;
-  if (g_runtime.apple_hp_mode && apple_hp_backing_width(client) > 0 && apple_hp_backing_height(client) > 0) {
-    region_w = apple_hp_backing_width(client);
-    region_h = apple_hp_backing_height(client);
+  if (g_runtime.ard_hp_mode && ard_hp_backing_width(client) > 0 && ard_hp_backing_height(client) > 0) {
+    region_w = ard_hp_backing_width(client);
+    region_h = ard_hp_backing_height(client);
     allow_apply = 0;
   } else {
     region_w = fb_w;
@@ -2416,7 +2217,7 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
   }
 
   if (left > 32 || top > 32 || right < region_w - 33 || bottom < region_h - 33) {
-    int pad = (int)apple_hp_visible_content_pad();
+    int pad = (int)ard_hp_visible_content_pad();
     int crop_left = left;
     int crop_top = top;
     int crop_right = right;
@@ -2443,7 +2244,7 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
     crop_w = crop_right - crop_left + 1;
     crop_h = crop_bottom - crop_top + 1;
     if (crop_w > 0 && crop_h > 0) {
-      if (g_runtime.apple_hp_mode && !allow_apply) {
+      if (g_runtime.ard_hp_mode && !allow_apply) {
         g_hp.visible_content_valid = 1;
         g_hp.visible_content_x = crop_left;
         g_hp.visible_content_y = crop_top;
@@ -2468,9 +2269,9 @@ static void maybe_update_live_view_crop(rfbClient *client, int updated_w, int up
 }
 
 static void render_live_cursor(rfbClient *client) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  struct apple_hp_cursor_cache_entry *entry;
-  struct apple_hp_live_view_geometry geom;
+#if defined(ARDHPDEBUG_HAS_SDL)
+  struct ard_hp_cursor_cache_entry *entry;
+  struct ard_hp_live_view_geometry geom;
   SDL_Rect dst;
   SDL_Rect bar;
   int scale_num_w = 1;
@@ -2484,7 +2285,7 @@ static void render_live_cursor(rfbClient *client) {
 
   if (!client || !g_live.renderer) return;
 
-#if APPLEHPDEBUG_DEBUG_BUILD
+#if ARDHPDEBUG_DEBUG_BUILD
   SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
   SDL_SetRenderDrawColor(g_live.renderer, 255, 64, 64, 220);
   bar.x = g_live.pointer_draw_x - 8;
@@ -2508,12 +2309,12 @@ static void render_live_cursor(rfbClient *client) {
   memset(&geom, 0, sizeof(geom));
   if (compute_live_view_geometry(client, &geom) && geom.valid &&
       geom.dst.w > 0 && geom.dst.h > 0) {
-    if (g_runtime.apple_hp_mode &&
-        apple_hp_display_width(client) > 0 && apple_hp_display_height(client) > 0) {
+    if (g_runtime.ard_hp_mode &&
+        ard_hp_display_width(client) > 0 && ard_hp_display_height(client) > 0) {
       scale_num_w = geom.dst.w;
       scale_num_h = geom.dst.h;
-      scale_den_w = apple_hp_display_width(client);
-      scale_den_h = apple_hp_display_height(client);
+      scale_den_w = ard_hp_display_width(client);
+      scale_den_h = ard_hp_display_height(client);
     } else if (geom.src.w > 0 && geom.src.h > 0) {
       scale_num_w = geom.dst.w;
       scale_num_h = geom.dst.h;
@@ -2544,12 +2345,13 @@ static void render_live_cursor(rfbClient *client) {
 }
 
 static void redraw_live_view(rfbClient *client) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  struct apple_hp_live_view_geometry geom;
+#if defined(ARDHPDEBUG_HAS_SDL)
+  struct ard_hp_live_view_geometry geom;
 
   if (!g_runtime.live_view || !client || !g_live.texture || !g_live.renderer) return;
   memset(&geom, 0, sizeof(geom));
   if (!compute_live_view_geometry(client, &geom)) return;
+  maybe_note_live_view_geometry_intent(client, &geom);
   SDL_SetRenderDrawColor(g_live.renderer, 0, 0, 0, 255);
   if (SDL_RenderClear(g_live.renderer) < 0) return;
   if (SDL_RenderCopy(g_live.renderer, g_live.texture, &geom.src, &geom.dst) < 0) return;
@@ -2609,7 +2411,7 @@ static rfbBool alloc_live_fb(rfbClient *client) {
 
   if (!g_live.window) {
     g_live.window = SDL_CreateWindow(
-        client->desktopName ? client->desktopName : "applehpdebug",
+        client->desktopName ? client->desktopName : "ardhpdebug",
         SDL_WINDOWPOS_UNDEFINED,
         SDL_WINDOWPOS_UNDEFINED,
         view_width,
@@ -2632,9 +2434,11 @@ static rfbBool alloc_live_fb(rfbClient *client) {
         !g_live.window_user_sized &&
         (current_w != view_width || current_h != view_height)) {
       /* The initial non-HP framebuffer can be a transient ultra-wide size.
-       * Once AppleDisplayLayout arrives, keep the live-view window aligned
+       * Once ARDDisplayLayout arrives, keep the live-view window aligned
        * with the new target aspect instead of preserving the stale shell. */
       g_live.synthetic_resize_events += 2;
+      g_live.synthetic_resize_w = view_width;
+      g_live.synthetic_resize_h = view_height;
       SDL_SetWindowSize(g_live.window, view_width, view_height);
     }
     if (client->desktopName) SDL_SetWindowTitle(g_live.window, client->desktopName);
@@ -2695,32 +2499,52 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_EXPOSED:
           invalidate_live_view_runtime_size();
           refresh_live_view_layout(client);
+          g_live.pending_dynamic_resize = 1;
           queue_live_view_present(0, 0, client->width, client->height);
           present_live_view(client, 0, 0, client->width, client->height);
           SendFramebufferUpdateRequest(client, 0, 0,
-                                       apple_hp_request_width(client),
-                                       apple_hp_request_height(client), FALSE);
+                                       ard_hp_request_width(client),
+                                       ard_hp_request_height(client), FALSE);
           break;
         case SDL_WINDOWEVENT_RESIZED:
         case SDL_WINDOWEVENT_SIZE_CHANGED:
         case SDL_WINDOWEVENT_MAXIMIZED:
         case SDL_WINDOWEVENT_RESTORED:
         case SDL_WINDOWEVENT_SHOWN:
+        {
           invalidate_live_view_runtime_size();
-          refresh_live_view_layout(client);
-          redraw_live_view(client);
-          if (g_live.synthetic_resize_events > 0) {
+          if (live_view_event_matches_synthetic_resize(e)) {
             g_live.synthetic_resize_events--;
+            if (g_live.synthetic_resize_events <= 0) {
+              g_live.synthetic_resize_w = 0;
+              g_live.synthetic_resize_h = 0;
+            }
           } else {
+            g_live.synthetic_resize_events = 0;
+            g_live.synthetic_resize_w = 0;
+            g_live.synthetic_resize_h = 0;
             if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
               g_live.window_user_sized = 1;
-              g_live.pending_dynamic_resize = 1;
+            }
+            g_live.pending_dynamic_resize = 1;
+            if (e->window.data1 > 0 && e->window.data1 <= 0xffff &&
+                e->window.data2 > 0 && e->window.data2 <= 0xffff) {
+              g_live.cached_runtime_w = (uint16_t)e->window.data1;
+              g_live.cached_runtime_h = (uint16_t)e->window.data2;
+              g_live.runtime_size_valid = 1;
             }
           }
+          refresh_live_view_layout(client);
+          if (g_runtime.ard_hp_mode) {
+            arm_live_view_refresh_present();
+          } else {
+            redraw_live_view(client);
+          }
           SendFramebufferUpdateRequest(client, 0, 0,
-                                       apple_hp_request_width(client),
-                                       apple_hp_request_height(client), FALSE);
+                                       ard_hp_request_width(client),
+                                       ard_hp_request_height(client), FALSE);
           break;
+        }
         case SDL_WINDOWEVENT_FOCUS_LOST:
           if (g_live.right_alt_key_down) {
             SendKeyEvent(client, XK_Alt_R, FALSE);
@@ -2742,7 +2566,7 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         for (steps = 0; steps < e->wheel.y; ++steps) {
           int send_x = 0;
           int send_y = 0;
-          apple_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
+          ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
           SendPointerEvent(client, send_x, send_y, rfbButton4Mask);
           SendPointerEvent(client, send_x, send_y, 0);
         }
@@ -2752,7 +2576,7 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         for (steps = 0; steps > e->wheel.y; --steps) {
           int send_x = 0;
           int send_y = 0;
-          apple_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
+          ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
           SendPointerEvent(client, send_x, send_y, rfbButton5Mask);
           SendPointerEvent(client, send_x, send_y, 0);
         }
@@ -2789,7 +2613,7 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
       {
         int send_x = 0;
         int send_y = 0;
-        apple_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
+        ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
         SendPointerEvent(client, send_x, send_y, g_live.button_mask);
       }
       redraw_live_view(client);
@@ -2825,7 +2649,7 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
 
 static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   SDL_Rect r;
-  struct apple_hp_live_view_geometry geom;
+  struct ard_hp_live_view_geometry geom;
   SDL_Surface *sdl;
   if (!g_runtime.live_view || !client || !g_live.texture || !g_live.renderer) return;
   if (w <= 0 || h <= 0) return;
@@ -2853,6 +2677,7 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   maybe_update_live_view_crop(client, w, h);
   memset(&geom, 0, sizeof(geom));
   if (!compute_live_view_geometry(client, &geom)) return;
+  maybe_note_live_view_geometry_intent(client, &geom);
   if (g_live.needs_clear) {
     SDL_SetRenderDrawColor(g_live.renderer, 0, 0, 0, 255);
     if (SDL_RenderClear(g_live.renderer) < 0) {
@@ -2875,19 +2700,6 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
 
 static int kHighPerfProbeEncodings[] = {0x44f, 0x450, 0x451, 0x453, 0x455, 0x456, 0x3f2, 0};
 
-static const char *apple_hp_rect_encoding_name(int32_t encoding) {
-  switch (encoding) {
-    case 0x3f2: return "RFBMediaStream";
-    case 0x450: return "CursorImage";
-    case 0x44f: return "EncodeEncryptionInfo";
-    case 0x451: return "AppleDisplayLayout";
-    case 0x453: return "VendorKeysymEncoding";
-    case 0x455: return "KeyboardInputSource";
-    case 0x456: return "DeviceInfo";
-    default: return "Unknown";
-  }
-}
-
 static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateRectHeader *rect) {
   g_live.skip_next_fb_update = 1;
   uint8_t buf[36];
@@ -2908,28 +2720,25 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   uint8_t next_key[16];
   uint8_t next_iv[16];
   uint16_t payload_len;
-  uint16_t media_msg_version;
   size_t total_len;
-  char label[96];
 
   if (!client || !rect) return FALSE;
   if ((uint32_t)rect->encoding == 0x44f) {
     if (!ReadFromRFBServer(client, (char *)buf, sizeof(buf))) return FALSE;
 
     g_hp.rekey_seen = 1;
-    if (!rfbClientAppleHPDecryptRekeyRecord(client, buf, sizeof(buf), &counter, next_key, next_iv))
+    if (!rfbClientARDHPDecryptRekeyRecord(client, buf, sizeof(buf), &counter, next_key, next_iv))
       return FALSE;
-    if (!rfbClientAppleHPSendPostRekeySetEncryptionStage2(client)) return FALSE;
+    if (!rfbClientARDHPSendPostRekeySetEncryptionStage2(client)) return FALSE;
     memset(client->ardSessionKey, 0, sizeof(client->ardSessionKey));
     memcpy(client->ardSessionKey, next_key, 16);
     client->ardSessionKeyLen = 16;
     client->ardSessionKeyReady = TRUE;
     client->suppressNextIncrementalRequest = TRUE;
-    if (!apple_hp_enable_transport(client, next_key, next_iv, counter)) return FALSE;
-    if (!rfbClientAppleHPSendInitialDisplayConfiguration(client)) return FALSE;
-    if (!rfbClientAppleHPSendPostAuthEncodings(client)) return FALSE;
+    if (!rfbClientARDHPEnableTransport(client, next_key, next_iv, counter)) return FALSE;
+    if (!rfbClientARDHPSendInitialDisplayConfiguration(client)) return FALSE;
+    if (!rfbClientARDHPSendPostAuthEncodings(client)) return FALSE;
     g_hp.post_rekey_ready = 1;
-    g_hp.post_rekey_server_records = 0;
     g_hp.post_rekey_phase = 0;
     return TRUE;
   }
@@ -2939,11 +2748,9 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     if (!ReadFromRFBServer(client, (char *)cursor_hdr, sizeof(cursor_hdr))) return FALSE;
     cursor_cache_id = read_be_u32(cursor_hdr);
     cursor_zlib_len = read_be_u32(cursor_hdr + 4);
-    snprintf(label, sizeof(label), "apple-hp rect 0x450 CursorImage cache=%u zlib=%u",
-             cursor_cache_id, cursor_zlib_len);
     if (cursor_zlib_len != 0) {
       if (cursor_zlib_len > (16U * 1024U * 1024U)) {
-        rfbClientErr("apple-hp: refusing oversized cursor payload %u for cache=%u\n",
+        rfbClientErr("ard-hp: refusing oversized cursor payload %u for cache=%u\n",
                      cursor_zlib_len, cursor_cache_id);
         return FALSE;
       }
@@ -2953,9 +2760,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
         free(payload);
         return FALSE;
       }
-      snprintf(label, sizeof(label), "apple-hp rect 0x450 CursorImage payload cache=%u",
-               cursor_cache_id);
-      cursor_changed = apple_hp_store_cursor_image(client, cursor_cache_id, rect->r.x, rect->r.y,
+      cursor_changed = ard_hp_store_cursor_image(client, cursor_cache_id, rect->r.x, rect->r.y,
                                                    rect->r.w, rect->r.h, payload, cursor_zlib_len);
       free(payload);
     } else {
@@ -2987,12 +2792,6 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     free(payload);
     return FALSE;
   }
-  snprintf(label, sizeof(label), "apple-hp rect 0x%03x %s",
-           (unsigned)rect->encoding, apple_hp_rect_encoding_name(rect->encoding));
-  if ((uint32_t)rect->encoding == 0x3f2 && total_len >= 4) {
-    media_msg_version = read_be_u16(payload + 2);
-    (void)media_msg_version;
-  }
   if ((uint32_t)rect->encoding == 0x451 && total_len >= 12) {
     int first_display_layout = !g_hp.displayinfo2_seen;
     g_hp.displayinfo2_seen = 1;
@@ -3012,31 +2811,26 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       g_hp.layout_scaled_w = ui_w;
       g_hp.layout_scaled_h = ui_h;
     }
-    if (client && apple_hp_backing_width(client) != 0 && apple_hp_backing_height(client) != 0 &&
-        ((uint32_t)apple_hp_backing_width(client) + kAppleHPFramebufferSlack > (uint32_t)client->width ||
-         (uint32_t)apple_hp_backing_height(client) + kAppleHPFramebufferSlack > (uint32_t)client->height)) {
-      if (!apple_hp_resize_framebuffer_if_needed(client,
-                                                 apple_hp_backing_width(client),
-                                                 apple_hp_backing_height(client))) {
+    if (client && ard_hp_backing_width(client) != 0 && ard_hp_backing_height(client) != 0 &&
+        ((uint32_t)ard_hp_backing_width(client) + kARDHPFramebufferSlack > (uint32_t)client->width ||
+         (uint32_t)ard_hp_backing_height(client) + kARDHPFramebufferSlack > (uint32_t)client->height)) {
+      if (!ard_hp_resize_framebuffer_if_needed(client,
+                                                 ard_hp_backing_width(client),
+                                                 ard_hp_backing_height(client))) {
         free(payload);
         return FALSE;
       }
     }
     if (client && first_display_layout) {
-      uint16_t request_w = apple_hp_request_width(client);
-      uint16_t request_h = apple_hp_request_height(client);
-      if (!apple_hp_request_full_refresh_now(client, request_w, request_h, "first-display-layout")) {
-        free(payload);
-        return FALSE;
-      }
+      int startup_resize_sent = 0;
       g_hp.initial_full_refresh_done = 0;
       g_hp.initial_full_refresh_retries = 0;
       if (!g_live.window_user_sized) {
         uint16_t startup_target_w = 0;
         uint16_t startup_target_h = 0;
-        if (apple_hp_compute_dynamic_resolution_target(client, &startup_target_w, &startup_target_h) &&
+        if (ard_hp_compute_dynamic_resolution_target(client, &startup_target_w, &startup_target_h) &&
             startup_target_w != 0 && startup_target_h != 0 &&
-            apple_hp_dynamic_target_materially_diff(startup_target_w, startup_target_h,
+            ard_hp_dynamic_target_materially_diff(startup_target_w, startup_target_h,
                                                     scaled_w, scaled_h)) {
           g_live.last_runtime_w = startup_target_w;
           g_live.last_runtime_h = startup_target_h;
@@ -3044,6 +2838,15 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
             free(payload);
             return FALSE;
           }
+          startup_resize_sent = g_hp.dynamic_request_in_flight;
+        }
+      }
+      if (!startup_resize_sent) {
+        uint16_t request_w = ard_hp_request_width(client);
+        uint16_t request_h = ard_hp_request_height(client);
+        if (!ard_hp_request_full_refresh_now(client, request_w, request_h, "first-display-layout")) {
+          free(payload);
+          return FALSE;
         }
       }
     }
@@ -3051,23 +2854,24 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
         (scaled_w != prev_display_w || scaled_h != prev_display_h ||
          ui_w != prev_backing_w || ui_h != prev_backing_h ||
          g_hp.last_dynamic_request_w == 0 || g_hp.last_dynamic_request_h == 0)) {
-      uint16_t request_w = apple_hp_request_width(client);
-      uint16_t request_h = apple_hp_request_height(client);
+      uint16_t request_w = ard_hp_request_width(client);
+      uint16_t request_h = ard_hp_request_height(client);
       uint16_t pending_target_w = g_hp.pending_dynamic_target_w;
       uint16_t pending_target_h = g_hp.pending_dynamic_target_h;
       reset_live_view_crop();
       refresh_live_view_layout(client);
+      arm_live_view_refresh_present();
       if (g_hp.dynamic_request_in_flight &&
           scaled_w == g_hp.last_dynamic_request_w &&
           scaled_h == g_hp.last_dynamic_request_h) {
-        rfbClientLog("apple-hp: confirmed dynamic target %ux%u from AppleDisplayLayout\n",
+        rfbClientLog("ard-hp: confirmed dynamic target %ux%u from ARDDisplayLayout\n",
                      (unsigned)scaled_w, (unsigned)scaled_h);
-        apple_hp_clear_dynamic_request_state(FALSE);
+        ard_hp_clear_dynamic_request_state(FALSE);
         if (pending_target_w != 0 &&
             pending_target_h != 0 &&
-            apple_hp_dynamic_target_materially_diff(pending_target_w, pending_target_h,
+            ard_hp_dynamic_target_materially_diff(pending_target_w, pending_target_h,
                                                     scaled_w, scaled_h)) {
-          apple_hp_clear_pending_dynamic_target();
+          ard_hp_clear_pending_dynamic_target();
           g_live.last_runtime_w = pending_target_w;
           g_live.last_runtime_h = pending_target_h;
           if (!maybe_send_dynamic_resolution_update(client, "layout-confirmed-pending", TRUE)) {
@@ -3075,7 +2879,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
             return FALSE;
           }
         } else if (!g_hp.dynamic_refresh_queued_for_request) {
-          apple_hp_clear_pending_dynamic_target();
+          ard_hp_clear_pending_dynamic_target();
           g_hp.pending_refresh_w = request_w;
           g_hp.pending_refresh_h = request_h;
           g_hp.initial_full_refresh_retries = 0;
@@ -3139,15 +2943,15 @@ static void configure_auth_schemes(rfbClient *client) {
     free(tmp);
   }
 
-  /* Default preference order for Apple HP sessions:
+  /* Default preference order for ARD HP sessions:
    * prefer SRP variants because they already export a rekey session key for the
    * post-auth high-performance transport. */
   {
     uint32_t auth_schemes[6];
     int i = 0;
-    const char *realm = apple_hp_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM");
-    const char *principal = apple_hp_getenv_first("VNC_APPLE_KRB_CLIENT_PRINCIPAL",
-                                                  "LIBVNCCLIENT_APPLE_KRB_CLIENT_PRINCIPAL");
+    const char *realm = ard_hp_getenv_first("VNC_ARD_KRB_REALM", "LIBVNCCLIENT_ARD_KRB_REALM");
+    const char *principal = ard_hp_getenv_first("VNC_ARD_KRB_CLIENT_PRINCIPAL",
+                                                  "LIBVNCCLIENT_ARD_KRB_CLIENT_PRINCIPAL");
     const char *user = getenv("VNC_USER");
     int kerb_ready = 0;
 
@@ -3168,11 +2972,11 @@ static void configure_ard_auth_overrides(rfbClient *client) {
 
   if (!client) return;
 
-  realm = apple_hp_getenv_first("VNC_APPLE_KRB_REALM", "LIBVNCCLIENT_APPLE_KRB_REALM");
-  client_principal = apple_hp_getenv_first("VNC_APPLE_KRB_CLIENT_PRINCIPAL",
-                                           "LIBVNCCLIENT_APPLE_KRB_CLIENT_PRINCIPAL");
-  service_principal = apple_hp_getenv_first("VNC_APPLE_KRB_SERVICE_PRINCIPAL",
-                                            "LIBVNCCLIENT_APPLE_KRB_SERVICE_PRINCIPAL");
+  realm = ard_hp_getenv_first("VNC_ARD_KRB_REALM", "LIBVNCCLIENT_ARD_KRB_REALM");
+  client_principal = ard_hp_getenv_first("VNC_ARD_KRB_CLIENT_PRINCIPAL",
+                                           "LIBVNCCLIENT_ARD_KRB_CLIENT_PRINCIPAL");
+  service_principal = ard_hp_getenv_first("VNC_ARD_KRB_SERVICE_PRINCIPAL",
+                                            "LIBVNCCLIENT_ARD_KRB_SERVICE_PRINCIPAL");
 
   if (realm && *realm) rfbClientSetARDAuthRealm(client, realm);
   if (client_principal && *client_principal)
@@ -3231,7 +3035,7 @@ static rfbCredential *get_credential(rfbClient *client, int credentialType) {
 }
 
 static rfbBool malloc_fb(rfbClient *client) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) return alloc_live_fb(client);
 #endif
   size_t size = (size_t)client->width * (size_t)client->height *
@@ -3272,18 +3076,22 @@ static void on_fb_update(rfbClient *client, int x, int y, int w, int h) {
   g_frame.frame_pixels += px;
   g_frame.pixels += px;
   g_frame.bytes_est += bytes;
-  if (client && apple_hp_should_suppress_incremental()) {
+  if (client && ard_hp_should_suppress_incremental()) {
     /* Native HP sessions transition to auto-update; suppress libvncclient's
      * default incremental polling after each completed framebuffer update. */
     client->suppressNextIncrementalRequest = TRUE;
   }
-#if defined(APPLEHPDEBUG_HAS_SDL)
-  if (g_runtime.live_view && g_runtime.apple_hp_mode && !g_hp.displayinfo2_seen) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_runtime.live_view && g_runtime.ard_hp_mode && !g_hp.displayinfo2_seen) {
+    queue_live_view_present(x, y, w, h);
+    if (g_live.present_per_rect && !g_live.awaiting_refresh_present)
+      present_live_view(client, x, y, w, h);
     return;
   }
   if (g_runtime.live_view) {
     queue_live_view_present(x, y, w, h);
-    if (g_live.present_per_rect) present_live_view(client, x, y, w, h);
+    if (g_live.present_per_rect && !g_live.awaiting_refresh_present)
+      present_live_view(client, x, y, w, h);
   }
 #endif
 }
@@ -3296,12 +3104,12 @@ static void on_fb_update_done(rfbClient *client) {
   if (g_frame.first_frame_ms == 0) g_frame.first_frame_ms = now_ms;
   g_frame.last_frame_ms = now_ms;
 
-  if (client && g_runtime.apple_hp_mode) {
-    repaint_w = apple_hp_backing_width(client);
-    repaint_h = apple_hp_backing_height(client);
+  if (client && g_runtime.ard_hp_mode) {
+    repaint_w = ard_hp_backing_width(client);
+    repaint_h = ard_hp_backing_height(client);
   } else if (client) {
-    repaint_w = apple_hp_content_width(client);
-    repaint_h = apple_hp_content_height(client);
+    repaint_w = ard_hp_content_width(client);
+    repaint_h = ard_hp_content_height(client);
   }
 
   if (!g_hp.initial_full_refresh_done && g_hp.displayinfo2_seen && client &&
@@ -3312,73 +3120,66 @@ static void on_fb_update_done(rfbClient *client) {
     if (g_frame.frame_pixels >= screen_px / 4ULL) {
       g_hp.initial_full_refresh_done = 1;
       g_hp.initial_full_refresh_retries = 0;
-      rfbClientLog("apple-hp: initial repaint satisfied frame_pixels=%llu threshold=%llu\n",
+      rfbClientLog("ard-hp: initial repaint satisfied frame_pixels=%llu threshold=%llu\n",
                    g_frame.frame_pixels, screen_px / 4ULL);
     }
   }
 
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_runtime.live_view && g_live.awaiting_refresh_present && client &&
+      g_frame.frame_pixels > 0) {
+    g_live.awaiting_refresh_present = 0;
+    reset_live_view_pending_present();
+    queue_live_view_present(0, 0, client->width, client->height);
+    if (g_live.present_per_rect) {
+      present_live_view(client, 0, 0, client->width, client->height);
+    }
+  }
   if (g_runtime.live_view) maybe_present_live_view_if_due(client, FALSE);
 #endif
 
   g_frame.frame_pixels = 0;
 }
 
-static int apple_hp_maybe_retry_initial_full_refresh(rfbClient *client) {
-  if (!g_runtime.apple_hp_mode || !client) return 1;
+static int ard_hp_maybe_retry_initial_full_refresh(rfbClient *client) {
+  if (!g_runtime.ard_hp_mode || !client) return 1;
   if (g_hp.initial_full_refresh_done || g_hp.initial_full_refresh_retries <= 0) return 1;
   if (client->width <= 0 || client->height <= 0) return 1;
 
   if (!SendFramebufferUpdateRequest(client, 0, 0,
-                                    apple_hp_request_width(client),
-                                    apple_hp_request_height(client), FALSE)) return 0;
-  if (apple_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
+                                    ard_hp_request_width(client),
+                                    ard_hp_request_height(client), FALSE)) return 0;
+  if (ard_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
   g_hp.initial_full_refresh_retries--;
-  rfbClientLog("apple-hp: retrying initial full refresh %ux%u remaining=%d\n",
-               (unsigned)apple_hp_request_width(client),
-               (unsigned)apple_hp_request_height(client),
+  rfbClientLog("ard-hp: retrying initial full refresh %ux%u remaining=%d\n",
+               (unsigned)ard_hp_request_width(client),
+               (unsigned)ard_hp_request_height(client),
                g_hp.initial_full_refresh_retries);
   return 1;
 }
 
-static int apple_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
+static int ard_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
                                              const char *reason) {
-  if (!g_runtime.apple_hp_mode || !client) return 1;
+  if (!g_runtime.ard_hp_mode || !client) return 1;
   if (w == 0 || h == 0) return 1;
-  if (g_hp.auto_fbu_active && !rfbClientAppleHPSendAutoFramebufferUpdate(client, w, h)) return 0;
+  if (g_hp.auto_fbu_active && !rfbClientARDHPSendAutoFramebufferUpdate(client, w, h)) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, w, h, FALSE)) return 0;
-  if (apple_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
-  rfbClientLog("apple-hp: requested full refresh %ux%u (%s)\n",
+  if (ard_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
+  rfbClientLog("ard-hp: requested full refresh %ux%u (%s)\n",
                (unsigned)w, (unsigned)h, reason ? reason : "unspecified");
   return 1;
 }
 
-static int apple_hp_maybe_request_pending_region_refresh(rfbClient *client) {
+static int ard_hp_maybe_request_pending_region_refresh(rfbClient *client) {
   uint16_t w = g_hp.pending_refresh_w;
   uint16_t h = g_hp.pending_refresh_h;
 
-  if (!g_runtime.apple_hp_mode || !client) return 1;
+  if (!g_runtime.ard_hp_mode || !client) return 1;
   if (w == 0 || h == 0) return 1;
 
   g_hp.pending_refresh_w = 0;
   g_hp.pending_refresh_h = 0;
-  return apple_hp_request_full_refresh_now(client, w, h, "AppleDisplayLayout");
-}
-
-static void on_cut_text(rfbClient *client, const char *text, int textlen) {
-  (void)client;
-  (void)text;
-  (void)textlen;
-}
-
-static void on_cursor_shape(rfbClient *client, int xhot, int yhot, int width,
-                            int height, int bytesPerPixel) {
-  (void)client;
-  (void)xhot;
-  (void)yhot;
-  (void)width;
-  (void)height;
-  (void)bytesPerPixel;
+  return ard_hp_request_full_refresh_now(client, w, h, "ARDDisplayLayout");
 }
 
 int main(int argc, char **argv) {
@@ -3399,10 +3200,10 @@ int main(int argc, char **argv) {
   g_runtime.live_view_vsync = env_flag_enabled("VNC_LIVE_VIEW_VSYNC");
   g_runtime.low_latency_input = env_flag_default_true("VNC_LIVE_VIEW_LOW_LATENCY_INPUT");
   g_runtime.log_input = env_flag_enabled("VNC_LOG_INPUT");
-  g_runtime.apple_hp_mode = env_flag_enabled("VNC_APPLE_HP");
+  g_runtime.ard_hp_mode = env_flag_enabled("VNC_ARD_HP");
   g_runtime.live_view_overlay = env_flag_enabled("VNC_LIVE_VIEW_OVERLAY");
 
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_NOPARACHUTE) != 0) {
       fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -3428,11 +3229,9 @@ int main(int argc, char **argv) {
   client->canHandleNewFBSize = TRUE;
   client->GotFrameBufferUpdate = on_fb_update;
   client->FinishedFrameBufferUpdate = on_fb_update_done;
-  client->GotXCutText = on_cut_text;
-  client->GotCursorShape = on_cursor_shape;
   client->GetCredential = get_credential;
   rfbClientRegisterExtension(&kHighPerfProbeExt);
-  if (!configure_apple_hp_mode(client)) return 1;
+  if (!configure_ard_hp_mode(client)) return 1;
 
   configure_auth_schemes(client);
 
@@ -3446,7 +3245,7 @@ int main(int argc, char **argv) {
     if (seconds <= 0) seconds = -1;
   }
 
-  apple_hp_seed_known_auth35_realm(host);
+  ard_hp_seed_known_auth35_realm(host);
   configure_ard_auth_overrides(client);
 
   /* libvncclient expects a single host[:port] positional target. */
@@ -3461,7 +3260,7 @@ int main(int argc, char **argv) {
   }
 
   if (!getenv("VNC_ENCODINGS")) {
-    if (g_runtime.apple_hp_mode)
+    if (g_runtime.ard_hp_mode)
       client->appData.encodingsString = NULL;
     else
       client->appData.encodingsString =
@@ -3478,16 +3277,16 @@ int main(int argc, char **argv) {
                client->serverHost ? client->serverHost : "(null)",
                client->serverPort,
                client->desktopName ? client->desktopName : "(null)");
-  if (g_runtime.apple_hp_mode && !client->appData.encodingsString)
-    rfbClientLog("encodings='(native-apple-hp-post-auth)'\n");
+  if (g_runtime.ard_hp_mode && !client->appData.encodingsString)
+    rfbClientLog("encodings='(native-ard-hp-post-auth)'\n");
   else
     rfbClientLog("encodings='%s'\n",
                  client->appData.encodingsString ? client->appData.encodingsString : "(null)");
 
-  if (!run_apple_hp_setup(client)) {
-    rfbClientErr("apple-hp: setup failed\n");
+  if (!run_ard_hp_setup(client)) {
+    rfbClientErr("ard-hp: setup failed\n");
     rfbClientCleanup(client);
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
     destroy_live_view();
 #endif
     return 1;
@@ -3495,20 +3294,16 @@ int main(int argc, char **argv) {
 
   start = time(NULL);
   while (!g_stop && (seconds < 0 || (time(NULL) - start) < seconds)) {
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
     if (g_runtime.live_view) {
       SDL_Event e;
       while (SDL_PollEvent(&e)) {
         if (!handle_live_view_event(client, &e)) break;
       }
-      if (g_live.pending_dynamic_resize && !live_view_should_drive_dynamic_resize()) {
-        g_live.pending_dynamic_resize = 0;
-      }
+      if (!maybe_observe_dynamic_resolution_target(client, "event-loop")) break;
       if (g_live.pending_dynamic_resize) {
-        if (apple_hp_dynamic_resize_ready(client)) {
-          if (!maybe_send_dynamic_resolution_update(client, "window-event", FALSE)) break;
-          g_live.pending_dynamic_resize = 0;
-        }
+        if (!maybe_send_dynamic_resolution_update(client, "window-event", TRUE)) break;
+        g_live.pending_dynamic_resize = 0;
       }
     }
 #endif
@@ -3517,19 +3312,19 @@ int main(int argc, char **argv) {
     if (n < 0) break;
     if (n > 0) {
       if (!HandleRFBServerMessage(client)) break;
-      if (!apple_hp_maybe_advance_post_rekey_setup(client)) break;
+      if (!ard_hp_maybe_advance_post_rekey_setup(client)) break;
     }
-    if (n == 0 && !apple_hp_maybe_advance_post_rekey_setup(client)) break;
-    if (n == 0 && !apple_hp_maybe_handle_dynamic_request_timeout(client)) break;
-    if (n == 0 && !apple_hp_maybe_request_pending_region_refresh(client)) break;
-    if (n == 0 && !apple_hp_maybe_retry_initial_full_refresh(client)) break;
-#if defined(APPLEHPDEBUG_HAS_SDL)
+    if (n == 0 && !ard_hp_maybe_advance_post_rekey_setup(client)) break;
+    if (n == 0 && !ard_hp_maybe_handle_dynamic_request_timeout(client)) break;
+    if (n == 0 && !ard_hp_maybe_request_pending_region_refresh(client)) break;
+    if (n == 0 && !ard_hp_maybe_retry_initial_full_refresh(client)) break;
+#if defined(ARDHPDEBUG_HAS_SDL)
     if (g_runtime.live_view && !maybe_present_live_view_if_due(client, FALSE)) break;
 #endif
   }
 
   rfbClientCleanup(client);
-#if defined(APPLEHPDEBUG_HAS_SDL)
+#if defined(ARDHPDEBUG_HAS_SDL)
   destroy_live_view();
 #endif
   return 0;

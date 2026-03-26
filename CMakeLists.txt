@@ -392,7 +392,7 @@ set(LIBVNCCLIENT_SOURCES
 if(APPLE)
   set(LIBVNCCLIENT_SOURCES
     ${LIBVNCCLIENT_SOURCES}
-    ${LIBVNCCLIENT_DIR}/applehp.c
+    ${LIBVNCCLIENT_DIR}/ardhp.c
   )
 endif()
 
@@ -636,7 +636,7 @@ endif(SDL2_FOUND)
 if(APPLE)
   set(LIBVNCCLIENT_EXAMPLES
     ${LIBVNCCLIENT_EXAMPLES}
-    applehpdebug
+    ardhpdebug
   )
 endif()
 
@@ -689,7 +689,7 @@ if(WITH_EXAMPLES)
       set_target_properties(client_examples_${e} PROPERTIES OUTPUT_NAME ${e})
       set_target_properties(client_examples_${e} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/examples/client)
       target_link_libraries(client_examples_${e} vncclient ${CMAKE_THREAD_LIBS_INIT} ${SDL2_LIBRARY} ${GTK2_LIBRARIES} ${FFMPEG_LIBRARIES} ${LIBSSHTUNNEL_LIBRARY})
-      if(APPLE AND e STREQUAL "applehpdebug")
+      if(APPLE AND e STREQUAL "ardhpdebug")
         target_link_libraries(client_examples_${e} "-framework Security" "-framework CoreFoundation" "-framework GSS" "-framework Kerberos")
         enable_debug_sanitizers(client_examples_${e})
       endif()
