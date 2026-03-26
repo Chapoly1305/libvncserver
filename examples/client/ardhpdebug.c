@@ -11,10 +11,12 @@
  *   VNC_PASS=<password>
  *   VNC_LIVE_VIEW=1
  *   VNC_LIVE_VIEW_OVERLAY=1
+ *   VNC_ARD_HIDPI=0            (optional, disable HiDPI on both local and remote)
  *   VNC_ARD_KRB_REALM=<realm>  (optional, for auth35)
  */
 
 #include <rfb/rfbclient.h>
+#include "ardhpdebug_hidpi.h"
 
 #include <signal.h>
 #include <stdarg.h>
@@ -52,6 +54,7 @@
 #endif
 
 static volatile sig_atomic_t g_stop = 0;
+static const uint32_t kARDHPStandardCursorCacheId = 0xfffffffeu;
 struct ard_hp_frame_stats {
   unsigned long long rects;
   unsigned long long frames;
@@ -69,7 +72,7 @@ struct ard_hp_runtime_options {
   int log_input;
   int ard_hp_mode;
   int live_view_overlay;
-  int ard_hp_simple_1080p;
+  int ard_hp_hidpi;
   int pointer_content_offset_x;
   int pointer_content_offset_y;
   uint32_t dynamic_min_delta;
@@ -204,6 +207,7 @@ struct ard_hp_live_view_geometry {
 };
 
 static void present_live_view(rfbClient *client, int x, int y, int w, int h);
+static void redraw_live_view(rfbClient *client);
 static void invalidate_live_view_runtime_size(void);
 static int maybe_present_live_view_if_due(rfbClient *client, int force);
 static void note_live_view_input(void);
@@ -373,8 +377,8 @@ static int live_view_recent_input_active(long long now_us) {
 }
 
 static long long live_view_present_interval_us(long long now_us) {
-  if (ard_hp_resize_transition_active()) return 16666;
-  if (live_view_recent_input_active(now_us)) return 16666;
+  if (ard_hp_resize_transition_active()) return 8333;
+  if (live_view_recent_input_active(now_us)) return 8333;
   return 33333;
 }
 
@@ -1029,8 +1033,12 @@ static void ard_hp_seed_known_auth35_realm(const char *host) {
   }
 }
 
-static int ard_hp_simple_1080p_enabled(void) {
-  return g_runtime.ard_hp_simple_1080p;
+static int ard_hp_hidpi_enabled(void) {
+  return g_runtime.ard_hp_hidpi;
+}
+
+static int ard_hp_nonhidpi_enabled(void) {
+  return !ard_hp_hidpi_enabled();
 }
 
 static double ard_hp_input_rect_scale(void) {
@@ -1102,14 +1110,14 @@ static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
 }
 
 static uint16_t ard_hp_content_width(rfbClient *client) {
-  if (ard_hp_simple_1080p_enabled()) return 1920;
+  if (ard_hp_nonhidpi_enabled()) return 1920;
   if (g_hp.display_scaled_w != 0) return g_hp.display_scaled_w;
   if (g_hp.display_ui_w != 0) return g_hp.display_ui_w;
   return client ? (uint16_t)client->width : 0;
 }
 
 static uint16_t ard_hp_content_height(rfbClient *client) {
-  if (ard_hp_simple_1080p_enabled()) return 1080;
+  if (ard_hp_nonhidpi_enabled()) return 1080;
   if (g_hp.display_scaled_h != 0) return g_hp.display_scaled_h;
   if (g_hp.display_ui_h != 0) return g_hp.display_ui_h;
   return client ? (uint16_t)client->height : 0;
@@ -1128,14 +1136,14 @@ static uint16_t ard_hp_backing_height(rfbClient *client) {
 }
 
 static uint16_t ard_hp_display_width(rfbClient *client) {
-  if (ard_hp_simple_1080p_enabled()) return 1920;
+  if (ard_hp_nonhidpi_enabled()) return 1920;
   if (g_hp.display_scaled_w != 0) return g_hp.display_scaled_w;
   if (g_hp.display_ui_w != 0) return g_hp.display_ui_w;
   return client ? (uint16_t)client->width : 0;
 }
 
 static uint16_t ard_hp_display_height(rfbClient *client) {
-  if (ard_hp_simple_1080p_enabled()) return 1080;
+  if (ard_hp_nonhidpi_enabled()) return 1080;
   if (g_hp.display_scaled_h != 0) return g_hp.display_scaled_h;
   if (g_hp.display_ui_h != 0) return g_hp.display_ui_h;
   return client ? (uint16_t)client->height : 0;
@@ -1552,6 +1560,30 @@ static uint32_t decode_cursor_color32(const rfbClient *client, const uint8_t *sr
   return (r << 16) | (g << 8) | b;
 }
 
+static uint32_t decode_cursor_color(const rfbClient *client, const uint8_t *src, int bytes_per_pixel) {
+  uint32_t raw = 0;
+  uint32_t r, g, b;
+  int i;
+
+  if (!client || !src || bytes_per_pixel <= 0 || bytes_per_pixel > 4) return 0;
+  if (client->format.bigEndian) {
+    for (i = 0; i < bytes_per_pixel; ++i) {
+      raw = (raw << 8) | (uint32_t)src[i];
+    }
+  } else {
+    for (i = bytes_per_pixel - 1; i >= 0; --i) {
+      raw = (raw << 8) | (uint32_t)src[i];
+    }
+  }
+  r = scale_channel_u8((raw >> client->format.redShift) & client->format.redMax,
+                       client->format.redMax);
+  g = scale_channel_u8((raw >> client->format.greenShift) & client->format.greenMax,
+                       client->format.greenMax);
+  b = scale_channel_u8((raw >> client->format.blueShift) & client->format.blueMax,
+                       client->format.blueMax);
+  return (r << 16) | (g << 8) | b;
+}
+
 static int inflate_cursor_payload(const uint8_t *src, uint32_t src_len, uint8_t *dst,
                                   size_t expected_len, size_t *out_len, int *out_zret) {
   z_stream zs;
@@ -1751,6 +1783,74 @@ static int ard_hp_store_cursor_image(rfbClient *client, uint32_t cache_id, int h
 #endif
 }
 
+static void on_cursor_shape(rfbClient *client, int xhot, int yhot, int width, int height, int bytesPerPixel) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  struct ard_hp_cursor_cache_entry *entry;
+  SDL_Texture *texture = NULL;
+  uint8_t *argb = NULL;
+  size_t pixel_count;
+  size_t i;
+
+  if (!client || !g_live.renderer || !client->rcSource || !client->rcMask ||
+      width <= 0 || height <= 0 || bytesPerPixel <= 0) {
+    return;
+  }
+
+  pixel_count = (size_t)width * (size_t)height;
+  argb = (uint8_t *)malloc(pixel_count * 4u);
+  if (!argb) return;
+
+  for (i = 0; i < pixel_count; ++i) {
+    uint32_t color = decode_cursor_color(client, client->rcSource + i * (size_t)bytesPerPixel,
+                                         bytesPerPixel);
+    uint8_t alpha = client->rcMask[i] ? 0xff : 0x00;
+    argb[i * 4u + 0] = (uint8_t)(color & 0xff);
+    argb[i * 4u + 1] = (uint8_t)((color >> 8) & 0xff);
+    argb[i * 4u + 2] = (uint8_t)((color >> 16) & 0xff);
+    argb[i * 4u + 3] = alpha;
+  }
+
+  texture = SDL_CreateTexture(g_live.renderer, SDL_PIXELFORMAT_ARGB8888,
+                              SDL_TEXTUREACCESS_STATIC, width, height);
+  if (!texture) {
+    free(argb);
+    return;
+  }
+  SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+  if (SDL_UpdateTexture(texture, NULL, argb, width * 4) < 0) {
+    SDL_DestroyTexture(texture);
+    free(argb);
+    return;
+  }
+
+  entry = alloc_cursor_cache_entry(kARDHPStandardCursorCacheId);
+  if (!entry) {
+    SDL_DestroyTexture(texture);
+    free(argb);
+    return;
+  }
+  if (entry->texture) SDL_DestroyTexture(entry->texture);
+  free(entry->pixels);
+  entry->texture = texture;
+  entry->pixels = argb;
+  entry->cache_id = kARDHPStandardCursorCacheId;
+  entry->hot_x = xhot;
+  entry->hot_y = yhot;
+  entry->width = width;
+  entry->height = height;
+  g_live.cursor_current_cache_id = kARDHPStandardCursorCacheId;
+  g_live.cursor_visible = 1;
+  redraw_live_view(client);
+#else
+  (void)client;
+  (void)xhot;
+  (void)yhot;
+  (void)width;
+  (void)height;
+  (void)bytesPerPixel;
+#endif
+}
+
 static void refresh_live_view_layout(rfbClient *client) {
 #if defined(ARDHPDEBUG_HAS_SDL)
   struct ard_hp_live_view_geometry geom;
@@ -1833,20 +1933,9 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
       output_h = 0;
     }
   }
-  if (output_w > 0 && output_h > 0) {
-    int hidpi_scale = 1;
-    if (window_w > 0) {
-      int inferred = (output_w + (window_w / 2)) / window_w;
-      if (inferred > hidpi_scale) hidpi_scale = inferred;
-    }
-    if (window_h > 0) {
-      int inferred = (output_h + (window_h / 2)) / window_h;
-      if (inferred > hidpi_scale) hidpi_scale = inferred;
-    }
-    if (hidpi_scale < 1) hidpi_scale = 1;
-    w = output_w / hidpi_scale;
-    h = output_h / hidpi_scale;
-  }
+  if (output_w > 0 && output_h > 0)
+    ardhpdebug_output_to_logical_size(window_w, window_h, output_w, output_h,
+                                      ard_hp_hidpi_enabled(), &w, &h);
   if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 ||
       (window_flags & SDL_WINDOW_FULLSCREEN) != 0) {
     /* Dynamic-resolution requests should follow the logical fullscreen window
@@ -1936,6 +2025,7 @@ static int live_view_should_drive_dynamic_resize(void) {
   Uint32 window_flags = 0;
 
   if (!g_runtime.live_view || !g_live.window) return 0;
+  if (ard_hp_nonhidpi_enabled()) return 0;
   window_flags = SDL_GetWindowFlags(g_live.window);
   if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 ||
       (window_flags & SDL_WINDOW_FULLSCREEN) != 0) {
@@ -2063,6 +2153,16 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   uint16_t display_h = 0;
 
   if (!client || !g_runtime.live_view || !g_runtime.ard_hp_mode) return 1;
+  if (ard_hp_nonhidpi_enabled()) {
+    g_live.pending_dynamic_resize = 0;
+    g_live.runtime_size_valid = 0;
+    g_live.debounce_runtime_w = 0;
+    g_live.debounce_runtime_h = 0;
+    g_live.debounce_runtime_started_ms = 0;
+    g_live.debounce_runtime_observations = 0;
+    ard_hp_clear_pending_dynamic_target();
+    return 1;
+  }
   if (!force && !ard_hp_dynamic_resize_ready(client)) return 1;
   if (!g_hp.rekey_seen || !rfbClientARDHPTransportActive(client)) return 1;
   if (!ard_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
@@ -2209,11 +2309,8 @@ static int compute_live_view_geometry(rfbClient *client, struct ard_hp_live_view
     geom->src.h = client->height > 0 ? client->height : 1;
   }
   if (g_runtime.ard_hp_mode && geom->src.w > 0 && geom->src.h > 0) {
-    /* Fit using the actual sampled backing/source rectangle. ARD HP often
-     * reports logical display dimensions that differ slightly from the backing
-     * it actually returns (for example 1616x1010 vs 3211x2007). Using the
-     * logical size for presentation introduces small bars and makes the source
-     * overlay appear larger than the destination box. */
+    /* Keep the sampled source rectangle 1:1 and aspect-fit it inside the local
+     * drawable. The unused area remains black. */
     fit_src_w = geom->src.w;
     fit_src_h = geom->src.h;
     fit_w = geom->output_w;
@@ -2294,6 +2391,16 @@ static int clamp_int(int value, int min_value, int max_value) {
   return value;
 }
 
+static int ard_hp_scroll_clicks_for_delta(double delta) {
+  double scaled = delta * 10.5;
+  int clicks = 0;
+
+  if (scaled < 0.0) scaled = -scaled;
+  clicks = (int)(scaled + 0.5);
+  if (clicks < 1) clicks = 1;
+  return clicks;
+}
+
 static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *out_x, int *out_y) {
 #if defined(ARDHPDEBUG_HAS_SDL)
   int window_w = 0;
@@ -2342,8 +2449,6 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
     rel_y = clamp_int(rel_y, 0, geom.dst.h - 1);
     input_rect = geom.dst;
     control_rect = geom.dst;
-    g_live.pointer_draw_x = output_x;
-    g_live.pointer_draw_y = output_y;
     used_simple_scale = 1;
     if (g_runtime.ard_hp_mode &&
         g_hp.visible_content_valid &&
@@ -2368,6 +2473,21 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
     }
     mapped_x = display_x;
     mapped_y = display_y;
+    if (g_runtime.ard_hp_mode && display_w > 0 && display_h > 0) {
+      g_live.pointer_draw_x = geom.dst.x +
+                              ard_hp_scale_coord_round(mapped_x, geom.dst.w, display_w);
+      g_live.pointer_draw_y = geom.dst.y +
+                              ard_hp_scale_coord_round(mapped_y, geom.dst.h, display_h);
+    } else {
+      g_live.pointer_draw_x = geom.dst.x +
+                              ard_hp_scale_coord_round(mapped_x - geom.src.x,
+                                                       geom.dst.w,
+                                                       geom.src.w);
+      g_live.pointer_draw_y = geom.dst.y +
+                              ard_hp_scale_coord_round(mapped_y - geom.src.y,
+                                                       geom.dst.h,
+                                                       geom.src.h);
+    }
   } else {
     mapped_x = output_x;
     mapped_y = output_y;
@@ -2387,6 +2507,11 @@ static void map_live_view_pointer(rfbClient *client, int in_x, int in_y, int *ou
   } else {
     if (mapped_x >= client->width) mapped_x = client->width - 1;
     if (mapped_y >= client->height) mapped_y = client->height - 1;
+  }
+  if (compute_live_view_geometry(client, &geom) && geom.valid &&
+      geom.dst.w > 0 && geom.dst.h > 0) {
+    g_live.pointer_draw_x = clamp_int(g_live.pointer_draw_x, geom.dst.x, geom.dst.x + geom.dst.w - 1);
+    g_live.pointer_draw_y = clamp_int(g_live.pointer_draw_y, geom.dst.y, geom.dst.y + geom.dst.h - 1);
   }
 
 done:
@@ -2423,15 +2548,18 @@ static void ard_hp_pointer_send_coords(rfbClient *client,
   backing_w = ard_hp_backing_width(client);
   backing_h = ard_hp_backing_height(client);
 
+  if (ard_hp_nonhidpi_enabled()) {
+    send_x = logical_x;
+    send_y = logical_y;
+  }
+
   /* After live dynamic-resolution reconfiguration, the remote starts sending a
    * downsized backing surface. In that mode, the old fixed 2x Retina send path
    * overshoots; logical desktop coordinates track the remote pointer correctly. */
   if (g_runtime.ard_hp_mode &&
-      g_hp.last_dynamic_request_w > 0 &&
-      g_hp.last_dynamic_request_h > 0 &&
       display_w > 0 && display_h > 0 &&
       backing_w > 0 && backing_h > 0 &&
-      backing_w < display_w && backing_h < display_h) {
+      backing_w <= display_w && backing_h <= display_h) {
     send_x = logical_x;
     send_y = logical_y;
   }
@@ -2451,7 +2579,7 @@ static void live_view_target_size(rfbClient *client, int *out_w, int *out_h) {
   SDL_Rect usable_bounds;
 #endif
 
-  if (ard_hp_simple_1080p_enabled()) {
+  if (ard_hp_nonhidpi_enabled()) {
     w = 1920;
     h = 1080;
   } else if (g_runtime.ard_hp_mode && display_w > 0 && display_h > 0) {
@@ -2466,7 +2594,7 @@ static void live_view_target_size(rfbClient *client, int *out_w, int *out_h) {
   }
 
 #if defined(ARDHPDEBUG_HAS_SDL)
-  if (!ard_hp_simple_1080p_enabled() &&
+  if (ard_hp_hidpi_enabled() &&
       w > 0 && h > 0 && SDL_GetDisplayUsableBounds(0, &usable_bounds) == 0 &&
       usable_bounds.w > 0 && usable_bounds.h > 0) {
     if (w > usable_bounds.w || h > usable_bounds.h) {
@@ -2648,22 +2776,18 @@ static void render_live_cursor(rfbClient *client) {
 
   if (!client || !g_live.renderer) return;
 
-#if ARDHPDEBUG_DEBUG_BUILD
   SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
-  SDL_SetRenderDrawColor(g_live.renderer, 255, 64, 64, 220);
-  bar.x = g_live.pointer_draw_x - 8;
+  SDL_SetRenderDrawColor(g_live.renderer, 255, 96, 96, 220);
+  bar.x = g_live.pointer_draw_x - 10;
   bar.y = g_live.pointer_draw_y;
-  bar.w = 17;
-  bar.h = 1;
+  bar.w = 21;
+  bar.h = 2;
   SDL_RenderFillRect(g_live.renderer, &bar);
   bar.x = g_live.pointer_draw_x;
-  bar.y = g_live.pointer_draw_y - 8;
-  bar.w = 1;
-  bar.h = 17;
+  bar.y = g_live.pointer_draw_y - 10;
+  bar.w = 2;
+  bar.h = 21;
   SDL_RenderFillRect(g_live.renderer, &bar);
-#else
-  (void)bar;
-#endif
 
   if (!g_live.cursor_visible || g_live.cursor_current_cache_id == 0) return;
   entry = find_cursor_cache_entry(g_live.cursor_current_cache_id);
@@ -2773,7 +2897,8 @@ static rfbBool alloc_live_fb(rfbClient *client) {
   live_view_target_size(client, &view_width, &view_height);
 
   if (!g_live.window) {
-    Uint32 window_create_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    Uint32 window_create_flags = SDL_WINDOW_RESIZABLE;
+    if (ard_hp_hidpi_enabled()) window_create_flags |= SDL_WINDOW_ALLOW_HIGHDPI;
     if (g_runtime.ard_hp_mode && !g_hp.displayinfo2_seen) {
       window_create_flags |= SDL_WINDOW_HIDDEN;
     }
@@ -2827,7 +2952,7 @@ static rfbBool alloc_live_fb(rfbClient *client) {
       rfbClientErr("live-view: SDL_CreateRenderer failed: %s\n", SDL_GetError());
       return FALSE;
     }
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
   }
   SDL_ShowCursor(SDL_DISABLE);
   SDL_RenderSetLogicalSize(g_live.renderer, 0, 0);
@@ -2865,6 +2990,8 @@ static rfbBool alloc_live_fb(rfbClient *client) {
 }
 
 static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
+  int allow_dynamic_resize = ard_hp_hidpi_enabled();
+
   switch (e->type) {
     case SDL_WINDOWEVENT:
       switch (e->window.event) {
@@ -2873,7 +3000,9 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
           refresh_live_view_layout(client);
           if (g_live.suppress_reveal_events > 0) {
             g_live.suppress_reveal_events--;
-          } else if (!ard_hp_startup_layout_pending() && g_live.synthetic_resize_events <= 0) {
+          } else if (allow_dynamic_resize &&
+                     !ard_hp_startup_layout_pending() &&
+                     g_live.synthetic_resize_events <= 0) {
             g_live.pending_dynamic_resize = 1;
           }
           queue_live_view_present(0, 0, client->width, client->height);
@@ -2902,7 +3031,7 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
             g_live.synthetic_resize_events = 0;
             g_live.synthetic_resize_w = 0;
             g_live.synthetic_resize_h = 0;
-            if (!ard_hp_startup_layout_pending()) {
+            if (allow_dynamic_resize && !ard_hp_startup_layout_pending()) {
               if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
                 g_live.window_user_sized = 1;
               }
@@ -2947,24 +3076,33 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
       break;
     case SDL_MOUSEWHEEL:
       note_live_view_input();
-      if (e->wheel.y > 0) {
-        int steps;
-        for (steps = 0; steps < e->wheel.y; ++steps) {
-          int send_x = 0;
-          int send_y = 0;
-          ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
-          SendPointerEvent(client, send_x, send_y, rfbButton4Mask);
-          SendPointerEvent(client, send_x, send_y, 0);
+      {
+        double wheel_y = (double)e->wheel.y;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        if (e->wheel.preciseY != 0.0f) wheel_y = (double)e->wheel.preciseY;
+#endif
+        if (e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) wheel_y = -wheel_y;
+        if (wheel_y > 0.0) {
+          int steps;
+          int clicks = ard_hp_scroll_clicks_for_delta(wheel_y);
+          for (steps = 0; steps < clicks; ++steps) {
+            int send_x = 0;
+            int send_y = 0;
+            ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
+            SendPointerEvent(client, send_x, send_y, rfbButton4Mask);
+            SendPointerEvent(client, send_x, send_y, 0);
+          }
         }
-      }
-      if (e->wheel.y < 0) {
-        int steps;
-        for (steps = 0; steps > e->wheel.y; --steps) {
+        if (wheel_y < 0.0) {
           int send_x = 0;
           int send_y = 0;
-          ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
-          SendPointerEvent(client, send_x, send_y, rfbButton5Mask);
-          SendPointerEvent(client, send_x, send_y, 0);
+          int steps;
+          int clicks = ard_hp_scroll_clicks_for_delta(wheel_y);
+          for (steps = 0; steps < clicks; ++steps) {
+            ard_hp_pointer_send_coords(client, g_live.pointer_x, g_live.pointer_y, &send_x, &send_y);
+            SendPointerEvent(client, send_x, send_y, rfbButton5Mask);
+            SendPointerEvent(client, send_x, send_y, 0);
+          }
         }
       }
       break;
@@ -3056,12 +3194,12 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   memset(&geom, 0, sizeof(geom));
   if (!compute_live_view_geometry(client, &geom)) return;
   maybe_note_live_view_geometry_intent(client, &geom);
+  SDL_SetRenderDrawColor(g_live.renderer, 0, 0, 0, 255);
+  if (SDL_RenderClear(g_live.renderer) < 0) {
+    rfbClientErr("live-view: SDL_RenderClear failed: %s\n", SDL_GetError());
+    return;
+  }
   if (g_live.needs_clear) {
-    SDL_SetRenderDrawColor(g_live.renderer, 0, 0, 0, 255);
-    if (SDL_RenderClear(g_live.renderer) < 0) {
-      rfbClientErr("live-view: SDL_RenderClear failed: %s\n", SDL_GetError());
-      return;
-    }
     g_live.needs_clear = 0;
   }
   if (SDL_RenderCopy(g_live.renderer, g_live.texture, &geom.src, &geom.dst) < 0) {
@@ -3118,7 +3256,9 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     client->ardSessionKeyReady = TRUE;
     client->suppressNextIncrementalRequest = TRUE;
     if (!rfbClientARDHPEnableTransport(client, next_key, next_iv, counter)) return FALSE;
-    if (!rfbClientARDHPSendInitialDisplayConfiguration(client)) return FALSE;
+    if (!rfbClientARDHPSendInitialDisplayConfiguration(client)) {
+      return FALSE;
+    }
     if (!rfbClientARDHPSendPostAuthEncodings(client)) return FALSE;
     g_hp.post_rekey_ready = 1;
     g_hp.post_rekey_phase = 0;
@@ -3626,7 +3766,7 @@ int main(int argc, char **argv) {
 #else
   g_runtime.live_view_overlay = env_flag_enabled("VNC_LIVE_VIEW_OVERLAY");
 #endif
-  g_runtime.ard_hp_simple_1080p = 0;
+  g_runtime.ard_hp_hidpi = ardhpdebug_hidpi_enabled_from_env();
   g_runtime.dynamic_min_delta = 32;
   g_runtime.dynamic_timeout_ms = 6000;
   g_runtime.dynamic_refresh_retry_ms = 750;
@@ -3659,6 +3799,7 @@ int main(int argc, char **argv) {
   client->canHandleNewFBSize = TRUE;
   client->GotFrameBufferUpdate = on_fb_update;
   client->FinishedFrameBufferUpdate = on_fb_update_done;
+  client->GotCursorShape = on_cursor_shape;
   client->GetCredential = get_credential;
   rfbClientRegisterExtension(&kHighPerfProbeExt);
   if (!configure_ard_hp_mode(client)) return 1;
@@ -3693,6 +3834,10 @@ int main(int argc, char **argv) {
 
   if (!rfbInitClient(client, &argc, argv)) {
     return 1;
+  }
+
+  if (!g_runtime.ard_hp_hidpi) {
+    ARDHP_INFO_LOG("ard-hp: forcing non-HiDPI local+remote mode\n");
   }
 
   rfbClientLog("connected host=%s port=%d desktop='%s'\n",

@@ -846,7 +846,7 @@ rfbBool rfbClientARDHPResizeFramebufferIfNeeded(rfbClient *client,
   if (!client || width == 0 || height == 0) return TRUE;
   alloc_w = width + slack;
   alloc_h = height + slack;
-  if (client->frameBuffer && client->width >= alloc_w && client->height >= alloc_h) return TRUE;
+  if (client->frameBuffer && client->width == alloc_w && client->height == alloc_h) return TRUE;
   client->width = alloc_w;
   client->height = alloc_h;
   client->screen.width = rfbClientSwap16IfLE(alloc_w);

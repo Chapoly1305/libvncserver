@@ -401,15 +401,13 @@ static inline struct ard_hp_viewer_info_message ard_hp_make_native_viewer_info(v
 static inline struct ard_hp_display_configuration_message
 ard_hp_make_native_display_configuration(void) {
   struct ard_hp_display_configuration_message msg;
-  const char *simple_1080p = getenv("VNC_ARD_HP_SIMPLE_1080P");
-  if (!simple_1080p || !*simple_1080p)
-    simple_1080p = getenv("VNC_APPLE_HP_SIMPLE_1080P");
-  int force_simple_1080p = simple_1080p && *simple_1080p &&
-                           strcmp(simple_1080p, "0") != 0 &&
-                           strcmp(simple_1080p, "false") != 0 &&
-                           strcmp(simple_1080p, "FALSE") != 0 &&
-                           strcmp(simple_1080p, "no") != 0 &&
-                           strcmp(simple_1080p, "NO") != 0;
+  const char *hidpi = getenv("VNC_ARD_HIDPI");
+  int hidpi_enabled = !hidpi || !*hidpi ||
+                      (strcmp(hidpi, "0") != 0 &&
+                       strcmp(hidpi, "false") != 0 &&
+                       strcmp(hidpi, "FALSE") != 0 &&
+                       strcmp(hidpi, "no") != 0 &&
+                       strcmp(hidpi, "NO") != 0);
   static const struct {
     uint32_t width;
     uint32_t height;
@@ -436,15 +434,15 @@ ard_hp_make_native_display_configuration(void) {
          sizeof("Screen Sharing Virtual Display"));
   ard_hp_store_be_float(msg.display.physical_width_be, 369.4545593261719f);
   ard_hp_store_be_float(msg.display.physical_height_be, 207.81817626953125f);
-  ard_hp_store_be32(msg.display.max_width_be, force_simple_1080p ? 1920 : 3840);
-  ard_hp_store_be32(msg.display.max_height_be, force_simple_1080p ? 1080 : 2160);
+  ard_hp_store_be32(msg.display.max_width_be, hidpi_enabled ? 3840 : 1920);
+  ard_hp_store_be32(msg.display.max_height_be, hidpi_enabled ? 2160 : 1080);
   ard_hp_store_be16(msg.display.current_mode_index_be, 0);
   ard_hp_store_be16(msg.display.preferred_mode_index_be, 0);
   ard_hp_store_be32(msg.display.unknown_config_u32_be, 7);
   ard_hp_store_be16(msg.display.mode_count_be, ARD_HP_DISPLAY_CONFIG_MODE_COUNT);
   for (i = 0; i < ARD_HP_DISPLAY_CONFIG_MODE_COUNT; ++i) {
-    ard_hp_store_be32(msg.display.modes[i].width_be, force_simple_1080p ? 1920 : kModes[i].width);
-    ard_hp_store_be32(msg.display.modes[i].height_be, force_simple_1080p ? 1080 : kModes[i].height);
+    ard_hp_store_be32(msg.display.modes[i].width_be, hidpi_enabled ? kModes[i].width : 1920);
+    ard_hp_store_be32(msg.display.modes[i].height_be, hidpi_enabled ? kModes[i].height : 1080);
     ard_hp_store_be32(msg.display.modes[i].scaled_width_be, 1920);
     ard_hp_store_be32(msg.display.modes[i].scaled_height_be, 1080);
     ard_hp_store_be_double(msg.display.modes[i].refresh_rate_be, kModes[i].refresh_rate);
