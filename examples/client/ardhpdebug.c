@@ -63,6 +63,7 @@ struct ard_hp_runtime_options {
   int log_input;
   int ard_hp_mode;
   int live_view_overlay;
+  int verbose_resize_debug;
 };
 
 struct ard_hp_known_krb_realm {
@@ -100,7 +101,18 @@ struct ard_hp_session_state {
   uint16_t last_backing_h;
   long long dynamic_request_started_ms;
   int dynamic_request_in_flight;
+  int dynamic_request_timed_out;
   int dynamic_refresh_queued_for_request;
+  int dynamic_refresh_retries;
+  long long dynamic_refresh_requested_ms;
+  uint16_t resize_trace_w;
+  uint16_t resize_trace_h;
+  long long resize_target_observed_ms;
+  long long resize_target_stable_ms;
+  long long resize_runtime_config_sent_ms;
+  long long resize_layout_confirmed_ms;
+  long long resize_first_post_layout_rect_ms;
+  long long resize_first_post_layout_present_ms;
 };
 
 static struct ard_hp_frame_stats g_frame = {0};
@@ -141,6 +153,7 @@ struct ard_hp_live_view_state {
   uint16_t debounce_runtime_w;
   uint16_t debounce_runtime_h;
   long long debounce_runtime_started_ms;
+  int debounce_runtime_observations;
   int has_pending_present;
   int pending_x;
   int pending_y;
@@ -205,6 +218,7 @@ static void refresh_live_view_layout(rfbClient *client);
 static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
 static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
                                                  uint16_t b_w, uint16_t b_h);
+static int ard_hp_resize_transition_active(void);
 #endif
 
 static int ard_hp_should_suppress_incremental(void) {
@@ -227,6 +241,158 @@ static void arm_live_view_refresh_present(void) {
   reset_live_view_pending_present();
   g_live.awaiting_refresh_present = 1;
   g_live.needs_clear = 1;
+}
+
+static void ard_hp_begin_resize_trace(uint16_t target_w, uint16_t target_h,
+                                      const char *reason) {
+  long long now_ms = 0;
+
+  if (target_w == 0 || target_h == 0) return;
+  now_ms = monotonic_ms();
+  if (g_hp.resize_trace_w == target_w &&
+      g_hp.resize_trace_h == target_h &&
+      g_hp.resize_target_observed_ms > 0) {
+    return;
+  }
+
+  g_hp.resize_trace_w = target_w;
+  g_hp.resize_trace_h = target_h;
+  g_hp.resize_target_observed_ms = now_ms;
+  g_hp.resize_target_stable_ms = 0;
+  g_hp.resize_runtime_config_sent_ms = 0;
+  g_hp.resize_layout_confirmed_ms = 0;
+  g_hp.resize_first_post_layout_rect_ms = 0;
+  g_hp.resize_first_post_layout_present_ms = 0;
+  ARDHP_INFO_LOG("ard-hp: resize target_observed %ux%u (%s)\n",
+                 (unsigned)target_w,
+                 (unsigned)target_h,
+                 reason ? reason : "unspecified");
+}
+
+static void ard_hp_note_resize_trace_stable(uint16_t target_w, uint16_t target_h) {
+  long long now_ms = 0;
+  long long observed_ms = 0;
+
+  if (target_w == 0 || target_h == 0) return;
+  if (g_hp.resize_trace_w != target_w || g_hp.resize_trace_h != target_h ||
+      g_hp.resize_target_observed_ms <= 0) {
+    ard_hp_begin_resize_trace(target_w, target_h, "stable");
+  }
+  if (g_hp.resize_target_stable_ms > 0) return;
+
+  now_ms = monotonic_ms();
+  g_hp.resize_target_stable_ms = now_ms;
+  if (now_ms > 0 && g_hp.resize_target_observed_ms > 0 &&
+      now_ms >= g_hp.resize_target_observed_ms) {
+    observed_ms = now_ms - g_hp.resize_target_observed_ms;
+  }
+  ARDHP_INFO_LOG("ard-hp: resize target_stable %ux%u observed_to_stable=%lld ms\n",
+                 (unsigned)target_w,
+                 (unsigned)target_h,
+                 observed_ms);
+}
+
+static void ard_hp_note_resize_runtime_sent(uint16_t target_w, uint16_t target_h,
+                                            const char *reason) {
+  long long now_ms = monotonic_ms();
+  long long observed_ms = 0;
+  long long stable_ms = 0;
+
+  if (target_w == 0 || target_h == 0) return;
+  if (g_hp.resize_trace_w != target_w || g_hp.resize_trace_h != target_h ||
+      g_hp.resize_target_observed_ms <= 0) {
+    ard_hp_begin_resize_trace(target_w, target_h, reason);
+  }
+  g_hp.resize_runtime_config_sent_ms = now_ms;
+  if (g_hp.resize_target_observed_ms > 0 && now_ms >= g_hp.resize_target_observed_ms) {
+    observed_ms = now_ms - g_hp.resize_target_observed_ms;
+  }
+  if (g_hp.resize_target_stable_ms > 0 && now_ms >= g_hp.resize_target_stable_ms) {
+    stable_ms = now_ms - g_hp.resize_target_stable_ms;
+  }
+  ARDHP_INFO_LOG("ard-hp: resize runtime_config_sent %ux%u observed_to_send=%lld ms stable_to_send=%lld ms (%s)\n",
+                 (unsigned)target_w,
+                 (unsigned)target_h,
+                 observed_ms,
+                 stable_ms,
+                 reason ? reason : "unspecified");
+}
+
+static void ard_hp_note_resize_layout_confirmed(uint16_t target_w, uint16_t target_h) {
+  long long now_ms = monotonic_ms();
+  long long sent_ms = 0;
+
+  if (target_w == 0 || target_h == 0) return;
+  if (g_hp.resize_trace_w != 0 &&
+      g_hp.resize_trace_h != 0 &&
+      (g_hp.resize_trace_w != target_w || g_hp.resize_trace_h != target_h)) {
+    ARDHP_INFO_LOG("ard-hp: resize layout_confirmed stale=%ux%u current_target=%ux%u\n",
+                   (unsigned)target_w,
+                   (unsigned)target_h,
+                   (unsigned)g_hp.resize_trace_w,
+                   (unsigned)g_hp.resize_trace_h);
+    return;
+  }
+  g_hp.resize_layout_confirmed_ms = now_ms;
+  g_hp.resize_first_post_layout_rect_ms = 0;
+  g_hp.resize_first_post_layout_present_ms = 0;
+  if (g_hp.resize_runtime_config_sent_ms > 0 && now_ms >= g_hp.resize_runtime_config_sent_ms) {
+    sent_ms = now_ms - g_hp.resize_runtime_config_sent_ms;
+  }
+  ARDHP_INFO_LOG("ard-hp: resize layout_confirmed %ux%u send_to_confirm=%lld ms\n",
+                 (unsigned)target_w,
+                 (unsigned)target_h,
+                 sent_ms);
+}
+
+static void ard_hp_note_resize_first_post_layout_rect(void) {
+  long long now_ms = 0;
+  long long confirm_ms = 0;
+
+  if (g_hp.resize_layout_confirmed_ms <= 0 ||
+      g_hp.resize_first_post_layout_rect_ms > 0 ||
+      g_hp.resize_trace_w == 0 ||
+      g_hp.resize_trace_h == 0) {
+    return;
+  }
+  now_ms = monotonic_ms();
+  g_hp.resize_first_post_layout_rect_ms = now_ms;
+  if (now_ms > 0 && now_ms >= g_hp.resize_layout_confirmed_ms) {
+    confirm_ms = now_ms - g_hp.resize_layout_confirmed_ms;
+  }
+  ARDHP_INFO_LOG("ard-hp: resize first_post_layout_rect %ux%u confirm_to_rect=%lld ms\n",
+                 (unsigned)g_hp.resize_trace_w,
+                 (unsigned)g_hp.resize_trace_h,
+                 confirm_ms);
+}
+
+static void ard_hp_note_resize_first_post_layout_present(void) {
+  long long now_ms = 0;
+  long long rect_ms = 0;
+  long long confirm_ms = 0;
+  long long total_ms = 0;
+
+  if (g_hp.resize_trace_w == 0 || g_hp.resize_trace_h == 0) return;
+  if (g_hp.resize_first_post_layout_present_ms > 0) return;
+  if (g_hp.resize_first_post_layout_rect_ms <= 0) return;
+
+  now_ms = monotonic_ms();
+  g_hp.resize_first_post_layout_present_ms = now_ms;
+  if (now_ms > 0 && now_ms >= g_hp.resize_first_post_layout_rect_ms) {
+    rect_ms = now_ms - g_hp.resize_first_post_layout_rect_ms;
+  }
+  if (g_hp.resize_layout_confirmed_ms > 0 && now_ms >= g_hp.resize_layout_confirmed_ms) {
+    confirm_ms = now_ms - g_hp.resize_layout_confirmed_ms;
+  }
+  if (g_hp.resize_runtime_config_sent_ms > 0 && now_ms >= g_hp.resize_runtime_config_sent_ms) {
+    total_ms = now_ms - g_hp.resize_runtime_config_sent_ms;
+  }
+  ARDHP_INFO_LOG("ard-hp: resize first_post_layout_present %ux%u rect_to_present=%lld ms confirm_to_present=%lld ms send_to_present=%lld ms\n",
+                 (unsigned)g_hp.resize_trace_w,
+                 (unsigned)g_hp.resize_trace_h,
+                 rect_ms,
+                 confirm_ms,
+                 total_ms);
 }
 
 static const char *live_view_window_event_name(Uint8 event) {
@@ -263,6 +429,7 @@ static void debug_log_live_view_window_state(const char *reason) {
   Uint32 flags = 0;
   SDL_Rect bounds;
 
+  if (!g_runtime.verbose_resize_debug) return;
   if (!g_live.window) return;
   memset(&bounds, 0, sizeof(bounds));
   flags = SDL_GetWindowFlags(g_live.window);
@@ -325,7 +492,8 @@ static int live_view_dynamic_resize_stable(rfbClient *client) {
   uint16_t display_w = 0;
   uint16_t display_h = 0;
   long long now_ms = 0;
-  const long long debounce_ms = 250;
+  long long elapsed_ms = 0;
+  const long long debounce_ms = 100;
 
   if (!client || !g_runtime.live_view || !g_live.window) return 1;
   if (!g_live.pending_dynamic_resize) return 1;
@@ -337,14 +505,17 @@ static int live_view_dynamic_resize_stable(rfbClient *client) {
     g_live.debounce_runtime_w = 0;
     g_live.debounce_runtime_h = 0;
     g_live.debounce_runtime_started_ms = 0;
+    g_live.debounce_runtime_observations = 0;
     return 1;
   }
   now_ms = monotonic_ms();
   if (target_w != g_live.debounce_runtime_w ||
       target_h != g_live.debounce_runtime_h) {
+    ard_hp_begin_resize_trace(target_w, target_h, "window-event");
     g_live.debounce_runtime_w = target_w;
     g_live.debounce_runtime_h = target_h;
     g_live.debounce_runtime_started_ms = now_ms;
+    g_live.debounce_runtime_observations = 1;
     debug_log_live_view_window_state("debounce-target-change");
     rfbClientLog("ard-hp: waiting for window resize to settle target=%ux%u\n",
                  (unsigned)target_w, (unsigned)target_h);
@@ -352,13 +523,22 @@ static int live_view_dynamic_resize_stable(rfbClient *client) {
   }
   if (g_live.debounce_runtime_started_ms <= 0) {
     g_live.debounce_runtime_started_ms = now_ms;
+    g_live.debounce_runtime_observations = 1;
     return 0;
   }
-  if (now_ms > 0 && (now_ms - g_live.debounce_runtime_started_ms) < debounce_ms) return 0;
+  if (g_live.debounce_runtime_observations < 0x7fffffff) {
+    g_live.debounce_runtime_observations++;
+  }
+  if (now_ms > 0 && now_ms >= g_live.debounce_runtime_started_ms) {
+    elapsed_ms = now_ms - g_live.debounce_runtime_started_ms;
+  }
+  if (g_live.debounce_runtime_observations < 2 && elapsed_ms < debounce_ms) return 0;
   debug_log_live_view_window_state("debounce-stable");
+  ard_hp_note_resize_trace_stable(target_w, target_h);
   g_live.debounce_runtime_w = 0;
   g_live.debounce_runtime_h = 0;
   g_live.debounce_runtime_started_ms = 0;
+  g_live.debounce_runtime_observations = 0;
   return 1;
 #else
   (void)client;
@@ -408,8 +588,19 @@ static int live_view_recent_input_active(long long now_us) {
 }
 
 static long long live_view_present_interval_us(long long now_us) {
+  if (ard_hp_resize_transition_active()) return 16666;
   if (live_view_recent_input_active(now_us)) return 16666;
   return 33333;
+}
+
+static int ard_hp_resize_transition_active(void) {
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_live.pending_dynamic_resize) return 1;
+  if (g_live.awaiting_refresh_present) return 1;
+#endif
+  if (g_hp.dynamic_request_in_flight) return 1;
+  if (g_hp.pending_refresh_w != 0 && g_hp.pending_refresh_h != 0) return 1;
+  return 0;
 }
 
 static int maybe_present_live_view_if_due(rfbClient *client, int force) {
@@ -703,6 +894,7 @@ static unsigned int main_loop_wait_usecs(void) {
       if (due_in_us <= 0) return 0;
       if (due_in_us < 16000) return (unsigned int)due_in_us;
     }
+    if (ard_hp_resize_transition_active()) return 4000;
     return 16000;
   }
 #endif
@@ -911,7 +1103,13 @@ static uint32_t ard_hp_dynamic_min_delta(void) {
 static uint32_t ard_hp_dynamic_timeout_ms(void) {
   uint32_t v = 0;
   if (parse_u32_env("VNC_ARD_HP_DYNAMIC_TIMEOUT_MS", &v) > 0 && v > 0) return v;
-  return 1500;
+  return 6000;
+}
+
+static uint32_t ard_hp_dynamic_refresh_retry_ms(void) {
+  uint32_t v = 0;
+  if (parse_u32_env("VNC_ARD_HP_DYNAMIC_REFRESH_RETRY_MS", &v) > 0 && v > 0) return v;
+  return 750;
 }
 
 static uint32_t ard_hp_visible_content_pad(void) {
@@ -1042,6 +1240,7 @@ static int send_runtime_display_configuration_blob(rfbClient *client,
   g_hp.last_dynamic_request_w = logical_w;
   g_hp.last_dynamic_request_h = logical_h;
   g_hp.dynamic_request_in_flight = 1;
+  g_hp.dynamic_request_timed_out = 0;
   g_hp.dynamic_refresh_queued_for_request = 0;
   return 1;
 }
@@ -1112,6 +1311,17 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   g_hp.initial_full_refresh_done = 0;
   g_hp.initial_full_refresh_retries = 3;
   g_hp.displayinfo2_seen = 0;
+  g_hp.dynamic_request_timed_out = 0;
+  g_hp.dynamic_refresh_retries = 0;
+  g_hp.dynamic_refresh_requested_ms = 0;
+  g_hp.resize_trace_w = 0;
+  g_hp.resize_trace_h = 0;
+  g_hp.resize_target_observed_ms = 0;
+  g_hp.resize_target_stable_ms = 0;
+  g_hp.resize_runtime_config_sent_ms = 0;
+  g_hp.resize_layout_confirmed_ms = 0;
+  g_hp.resize_first_post_layout_rect_ms = 0;
+  g_hp.resize_first_post_layout_present_ms = 0;
   if (ard_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
   rfbClientLog("ard-hp: requested initial full refresh %ux%u and queued %d retries\n",
                (unsigned)region_w, (unsigned)region_h, g_hp.initial_full_refresh_retries);
@@ -1304,6 +1514,7 @@ static void destroy_live_view(void) {
   g_live.debounce_runtime_w = 0;
   g_live.debounce_runtime_h = 0;
   g_live.debounce_runtime_started_ms = 0;
+  g_live.debounce_runtime_observations = 0;
   SDL_ShowCursor(SDL_ENABLE);
   (void)sdl;
 }
@@ -1818,6 +2029,16 @@ static void maybe_note_live_view_geometry_intent(rfbClient *client,
       g_live.cached_runtime_h == target_h) {
     return;
   }
+  if (g_hp.dynamic_request_in_flight &&
+      g_hp.last_dynamic_request_w == target_w &&
+      g_hp.last_dynamic_request_h == target_h) {
+    return;
+  }
+  if (g_hp.dynamic_request_timed_out &&
+      g_hp.last_dynamic_request_w == target_w &&
+      g_hp.last_dynamic_request_h == target_h) {
+    return;
+  }
 
   g_live.cached_runtime_w = target_w;
   g_live.cached_runtime_h = target_h;
@@ -1848,6 +2069,7 @@ static void ard_hp_clear_dynamic_request_state(int clear_last_request) {
   g_hp.dynamic_request_in_flight = 0;
   g_hp.dynamic_refresh_queued_for_request = 0;
   g_hp.dynamic_request_started_ms = 0;
+  if (clear_last_request) g_hp.dynamic_request_timed_out = 0;
   if (clear_last_request) {
     g_hp.last_dynamic_request_w = 0;
     g_hp.last_dynamic_request_h = 0;
@@ -1871,6 +2093,16 @@ static int maybe_observe_dynamic_resolution_target(rfbClient *client, const char
   }
   if (target_w == g_live.last_runtime_w &&
       target_h == g_live.last_runtime_h) {
+    return 1;
+  }
+  if (g_hp.dynamic_request_in_flight &&
+      target_w == g_hp.last_dynamic_request_w &&
+      target_h == g_hp.last_dynamic_request_h) {
+    return 1;
+  }
+  if (g_hp.dynamic_request_timed_out &&
+      target_w == g_hp.last_dynamic_request_w &&
+      target_h == g_hp.last_dynamic_request_h) {
     return 1;
   }
   if (!ard_hp_dynamic_resize_ready(client)) return 1;
@@ -1919,6 +2151,11 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
     g_live.last_runtime_h = target_h;
     return 1;
   }
+  if (g_hp.dynamic_request_timed_out &&
+      target_w == g_hp.last_dynamic_request_w &&
+      target_h == g_hp.last_dynamic_request_h) {
+    return 1;
+  }
   if (!force &&
       target_w == g_hp.last_dynamic_request_w &&
       target_h == g_hp.last_dynamic_request_h) {
@@ -1926,6 +2163,7 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   }
   if (!send_runtime_display_configuration_blob(client, target_w, target_h, reason)) return 0;
   g_hp.dynamic_request_started_ms = monotonic_ms();
+  ard_hp_note_resize_runtime_sent(target_w, target_h, reason);
   g_live.last_runtime_w = target_w;
   g_live.last_runtime_h = target_h;
   ard_hp_clear_pending_dynamic_target();
@@ -1949,7 +2187,8 @@ static int ard_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
                (unsigned)timed_out_w,
                (unsigned)timed_out_h,
                elapsed_ms);
-  ard_hp_clear_dynamic_request_state(TRUE);
+  ard_hp_clear_dynamic_request_state(FALSE);
+  g_hp.dynamic_request_timed_out = 1;
   if (g_hp.pending_dynamic_target_w != 0 && g_hp.pending_dynamic_target_h != 0) {
     uint16_t pending_w = g_hp.pending_dynamic_target_w;
     uint16_t pending_h = g_hp.pending_dynamic_target_h;
@@ -1971,6 +2210,7 @@ static int ard_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
         g_live.debounce_runtime_w = 0;
         g_live.debounce_runtime_h = 0;
         g_live.debounce_runtime_started_ms = 0;
+        g_live.debounce_runtime_observations = 0;
         rfbClientLog("ard-hp: re-arming dynamic resize after timeout to updated target %ux%u\n",
                      (unsigned)current_w, (unsigned)current_h);
       } else {
@@ -2710,12 +2950,14 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_SHOWN:
         {
           invalidate_live_view_runtime_size();
-          ARDHP_DEBUG_LOG("ard-hp: live-view window-event=%s(%u) data=%dx%d synthetic=%d\n",
-                          live_view_window_event_name(e->window.event),
-                          (unsigned)e->window.event,
-                          e->window.data1,
-                          e->window.data2,
-                          g_live.synthetic_resize_events);
+          if (g_runtime.verbose_resize_debug) {
+            ARDHP_DEBUG_LOG("ard-hp: live-view window-event=%s(%u) data=%dx%d synthetic=%d\n",
+                            live_view_window_event_name(e->window.event),
+                            (unsigned)e->window.event,
+                            e->window.data1,
+                            e->window.data2,
+                            g_live.synthetic_resize_events);
+          }
           debug_log_live_view_window_state("window-event");
           if (e->window.event == SDL_WINDOWEVENT_SHOWN &&
               g_live.suppress_reveal_events > 0) {
@@ -2743,6 +2985,11 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
                 g_live.cached_runtime_w = (uint16_t)e->window.data1;
                 g_live.cached_runtime_h = (uint16_t)e->window.data2;
                 g_live.runtime_size_valid = 1;
+                if ((g_hp.dynamic_request_in_flight || g_hp.dynamic_request_timed_out) &&
+                    g_hp.last_dynamic_request_w == g_live.cached_runtime_w &&
+                    g_hp.last_dynamic_request_h == g_live.cached_runtime_h) {
+                  g_live.pending_dynamic_resize = 0;
+                }
               }
             }
           }
@@ -2906,6 +3153,7 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
   draw_live_view_overlay(client, &geom);
   SDL_RenderPresent(g_live.renderer);
   g_live.last_present_us = monotonic_us();
+  ard_hp_note_resize_first_post_layout_present();
   reset_live_view_pending_present();
 }
 #endif
@@ -3053,6 +3301,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       g_live.debounce_runtime_w = 0;
       g_live.debounce_runtime_h = 0;
       g_live.debounce_runtime_started_ms = 0;
+      g_live.debounce_runtime_observations = 0;
       g_hp.initial_full_refresh_done = 0;
       g_hp.initial_full_refresh_retries = 0;
       startup_target_valid = ard_hp_compute_dynamic_resolution_target(client,
@@ -3106,12 +3355,14 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       reset_live_view_crop();
       refresh_live_view_layout(client);
       arm_live_view_refresh_present();
-      if (g_hp.dynamic_request_in_flight &&
+      if ((g_hp.dynamic_request_in_flight || g_hp.dynamic_request_timed_out) &&
           scaled_w == g_hp.last_dynamic_request_w &&
           scaled_h == g_hp.last_dynamic_request_h) {
         rfbClientLog("ard-hp: confirmed dynamic target %ux%u from ARDDisplayLayout\n",
                      (unsigned)scaled_w, (unsigned)scaled_h);
+        ard_hp_note_resize_layout_confirmed(scaled_w, scaled_h);
         ard_hp_clear_dynamic_request_state(FALSE);
+        g_hp.dynamic_request_timed_out = 0;
         if (pending_target_w != 0 &&
             pending_target_h != 0 &&
             ard_hp_dynamic_target_materially_diff(pending_target_w, pending_target_h,
@@ -3128,12 +3379,16 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
           g_hp.pending_refresh_w = request_w;
           g_hp.pending_refresh_h = request_h;
           g_hp.initial_full_refresh_retries = 0;
+          g_hp.dynamic_refresh_retries = 3;
+          g_hp.dynamic_refresh_requested_ms = 0;
           g_hp.dynamic_refresh_queued_for_request = 1;
         }
       } else if (!(first_display_layout && startup_full_refresh_requested)) {
         g_hp.pending_refresh_w = request_w;
         g_hp.pending_refresh_h = request_h;
         g_hp.initial_full_refresh_retries = 0;
+        g_hp.dynamic_refresh_retries = 0;
+        g_hp.dynamic_refresh_requested_ms = 0;
       } else {
         rfbClientLog("ard-hp: skipping duplicate initial layout refresh %ux%u\n",
                      (unsigned)request_w, (unsigned)request_h);
@@ -3338,6 +3593,11 @@ static void on_fb_update(rfbClient *client, int x, int y, int w, int h) {
     return;
   }
   if (g_runtime.live_view) {
+    if (g_live.awaiting_refresh_present) {
+      g_hp.dynamic_refresh_retries = 0;
+      g_hp.dynamic_refresh_requested_ms = 0;
+      ard_hp_note_resize_first_post_layout_rect();
+    }
     queue_live_view_present(x, y, w, h);
     if (g_live.present_per_rect && !g_live.awaiting_refresh_present)
       present_live_view(client, x, y, w, h);
@@ -3378,10 +3638,14 @@ static void on_fb_update_done(rfbClient *client) {
   if (g_runtime.live_view && g_live.awaiting_refresh_present && client &&
       g_frame.frame_pixels > 0) {
     g_live.awaiting_refresh_present = 0;
+    g_hp.dynamic_refresh_retries = 0;
+    g_hp.dynamic_refresh_requested_ms = 0;
     reset_live_view_pending_present();
     queue_live_view_present(0, 0, client->width, client->height);
     if (g_live.present_per_rect) {
       present_live_view(client, 0, 0, client->width, client->height);
+    } else {
+      maybe_present_live_view_if_due(client, TRUE);
     }
   }
   if (g_runtime.live_view) maybe_reveal_live_view_after_initial_refresh(client);
@@ -3429,7 +3693,38 @@ static int ard_hp_maybe_request_pending_region_refresh(rfbClient *client) {
 
   g_hp.pending_refresh_w = 0;
   g_hp.pending_refresh_h = 0;
-  return ard_hp_request_full_refresh_now(client, w, h, "ARDDisplayLayout");
+  if (!ard_hp_request_full_refresh_now(client, w, h, "ARDDisplayLayout")) return 0;
+  if (g_hp.dynamic_refresh_retries > 0) {
+    g_hp.dynamic_refresh_requested_ms = monotonic_ms();
+  }
+  return 1;
+}
+
+static int ard_hp_maybe_retry_dynamic_full_refresh(rfbClient *client) {
+  long long elapsed_ms = 0;
+  uint16_t request_w = 0;
+  uint16_t request_h = 0;
+
+  if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (!g_live.awaiting_refresh_present) return 1;
+  if (g_hp.dynamic_refresh_retries <= 0) return 1;
+  if (g_hp.dynamic_refresh_requested_ms <= 0) return 1;
+  if (g_hp.pending_refresh_w != 0 || g_hp.pending_refresh_h != 0) return 1;
+
+  elapsed_ms = monotonic_ms() - g_hp.dynamic_refresh_requested_ms;
+  if (elapsed_ms < 0 || (uint32_t)elapsed_ms < ard_hp_dynamic_refresh_retry_ms()) return 1;
+
+  request_w = ard_hp_request_width(client);
+  request_h = ard_hp_request_height(client);
+  if (!ard_hp_request_full_refresh_now(client, request_w, request_h, "ARDDisplayLayout-retry"))
+    return 0;
+  g_hp.dynamic_refresh_requested_ms = monotonic_ms();
+  g_hp.dynamic_refresh_retries--;
+  rfbClientLog("ard-hp: retrying dynamic full refresh %ux%u remaining=%d\n",
+               (unsigned)request_w,
+               (unsigned)request_h,
+               g_hp.dynamic_refresh_retries);
+  return 1;
 }
 
 int main(int argc, char **argv) {
@@ -3452,6 +3747,7 @@ int main(int argc, char **argv) {
   g_runtime.log_input = env_flag_enabled("VNC_LOG_INPUT");
   g_runtime.ard_hp_mode = env_flag_enabled("VNC_ARD_HP");
   g_runtime.live_view_overlay = env_flag_enabled("VNC_LIVE_VIEW_OVERLAY");
+  g_runtime.verbose_resize_debug = env_flag_enabled("VNC_ARD_HP_VERBOSE_RESIZE");
 
 #if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) {
@@ -3559,6 +3855,7 @@ int main(int argc, char **argv) {
         g_live.debounce_runtime_w = 0;
         g_live.debounce_runtime_h = 0;
         g_live.debounce_runtime_started_ms = 0;
+        g_live.debounce_runtime_observations = 0;
       }
     }
 #endif
@@ -3572,6 +3869,7 @@ wait_for_server:
     if (n == 0 && !ard_hp_maybe_advance_post_rekey_setup(client)) break;
     if (n == 0 && !ard_hp_maybe_handle_dynamic_request_timeout(client)) break;
     if (n == 0 && !ard_hp_maybe_request_pending_region_refresh(client)) break;
+    if (n == 0 && !ard_hp_maybe_retry_dynamic_full_refresh(client)) break;
     if (n == 0 && !ard_hp_maybe_retry_initial_full_refresh(client)) break;
 #if defined(ARDHPDEBUG_HAS_SDL)
     if (g_runtime.live_view && !maybe_present_live_view_if_due(client, FALSE)) break;
