@@ -81,15 +81,19 @@ enum {
   /*
    * Viewer-command support bitmap bits from the native ViewerInfo payload.
    * These are capability ids, not rect encodings. Keep the numeric names for
-   * ids whose semantics are not proven yet.
+   * ids whose semantics are not proven yet. Current screensharingd proof:
+   *  - 31: viewer clipboard send
+   *  - 32: drop/drag event
+   *  - 30: recognized by the dispatcher, but unsupported in this build
+   *  - 35/81: still no active server-side consumer confirmed in this build
    */
   ARD_HP_VIEWER_CMD_FRAMEBUFFER_UPDATE = 0,
   ARD_HP_VIEWER_CMD_BELL = 2,
   ARD_HP_VIEWER_CMD_SERVER_CUT_TEXT = 3,
   ARD_HP_VIEWER_CMD_MISC_STATE_CHANGE = 20,
   ARD_HP_VIEWER_CMD_0x1e = 30,
-  ARD_HP_VIEWER_CMD_0x1f = 31,
-  ARD_HP_VIEWER_CMD_0x20 = 32,
+  ARD_HP_VIEWER_CMD_VIEWER_CLIPBOARD_SEND = 31,
+  ARD_HP_VIEWER_CMD_DROP_EVENT = 32,
   ARD_HP_VIEWER_CMD_0x23 = 35,
   ARD_HP_VIEWER_CMD_0x51 = 81,
 };

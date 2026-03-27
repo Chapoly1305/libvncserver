@@ -13,8 +13,12 @@ enum ard_hp_client_message_type {
   ARD_HP_MSG_AUTO_FRAMEBUFFER_UPDATE = 0x09,
   ARD_HP_MSG_SET_MODE = 0x0a,
   ARD_HP_MSG_SET_DISPLAY = 0x0d,
+  /* Observed post-auth client message; semantics still unresolved. */
+  ARD_HP_MSG_EXTENSION_0x10 = 0x10,
   ARD_HP_MSG_EXTENSION_0x12 = 0x12,
   ARD_HP_MSG_AUTO_PASTEBOARD = 0x15,
+  /* Native keyboard-source sharing message sent by RFBShareKeyboardSourceIDCore. */
+  ARD_HP_MSG_KEYBOARD_SOURCE_SHARE = 0x1a,
   ARD_HP_MSG_DISPLAY_CONFIGURATION = 0x1d,
   ARD_HP_MSG_VIEWER_INFO = 0x21,
 };
@@ -81,15 +85,19 @@ enum {
   /*
    * Viewer-command support bitmap bits from the native ViewerInfo payload.
    * These are capability ids, not rect encodings. Keep the numeric names for
-   * ids whose semantics are not proven yet.
+   * ids whose semantics are not proven yet. Current screensharingd proof:
+   *  - 31: viewer clipboard send
+   *  - 32: drop/drag event
+   *  - 30: recognized by the dispatcher, but unsupported in this build
+   *  - 35/81: still no active server-side consumer confirmed in this build
    */
   ARD_HP_VIEWER_CMD_FRAMEBUFFER_UPDATE = 0,
   ARD_HP_VIEWER_CMD_BELL = 2,
   ARD_HP_VIEWER_CMD_SERVER_CUT_TEXT = 3,
   ARD_HP_VIEWER_CMD_MISC_STATE_CHANGE = 20,
   ARD_HP_VIEWER_CMD_0x1e = 30,
-  ARD_HP_VIEWER_CMD_0x1f = 31,
-  ARD_HP_VIEWER_CMD_0x20 = 32,
+  ARD_HP_VIEWER_CMD_VIEWER_CLIPBOARD_SEND = 31,
+  ARD_HP_VIEWER_CMD_DROP_EVENT = 32,
   ARD_HP_VIEWER_CMD_0x23 = 35,
   ARD_HP_VIEWER_CMD_0x51 = 81,
 };
@@ -128,6 +136,28 @@ struct ard_hp_scale_factor_message {
   uint8_t type;
   uint8_t flags;
   uint8_t scale_be[8];
+};
+
+enum {
+  ARD_HP_AUTO_FRAMEBUFFER_UPDATE_ENABLE = 1,
+  /*
+   * Our current client behavior uses an all-ones interval field. Binary Ninja
+   * confirms the native 0x09 wire layout includes a u32 frame-update interval
+   * ahead of the update region, but the exact default semantics of 0xffffffff
+   * versus a concrete millisecond cadence are still under investigation.
+   */
+  ARD_HP_AUTO_FRAMEBUFFER_UPDATE_INTERVAL_DEFAULT = 0xffffffffu,
+};
+
+struct ard_hp_auto_framebuffer_update_message {
+  uint8_t type;
+  uint8_t reserved;
+  uint8_t enable_be[2];
+  uint8_t interval_ms_be[4];
+  uint8_t x_be[2];
+  uint8_t y_be[2];
+  uint8_t width_be[2];
+  uint8_t height_be[2];
 };
 
 struct ard_hp_auto_pasteboard_message {
@@ -229,6 +259,26 @@ static inline void ard_hp_store_be_double(uint8_t out[8], double value) {
   out[5] = (uint8_t)((v.u >> 16) & 0xff);
   out[6] = (uint8_t)((v.u >> 8) & 0xff);
   out[7] = (uint8_t)(v.u & 0xff);
+}
+
+static inline struct ard_hp_auto_framebuffer_update_message
+ard_hp_make_auto_framebuffer_update_message(uint16_t enable,
+                                            uint32_t interval_ms,
+                                            uint16_t x,
+                                            uint16_t y,
+                                            uint16_t width,
+                                            uint16_t height) {
+  struct ard_hp_auto_framebuffer_update_message msg;
+
+  memset(&msg, 0, sizeof(msg));
+  msg.type = ARD_HP_MSG_AUTO_FRAMEBUFFER_UPDATE;
+  ard_hp_store_be16(msg.enable_be, enable);
+  ard_hp_store_be32(msg.interval_ms_be, interval_ms);
+  ard_hp_store_be16(msg.x_be, x);
+  ard_hp_store_be16(msg.y_be, y);
+  ard_hp_store_be16(msg.width_be, width);
+  ard_hp_store_be16(msg.height_be, height);
+  return msg;
 }
 
 static inline void ard_hp_set_bitmap_bit(uint8_t *bitmap, uint8_t bit_index) {
