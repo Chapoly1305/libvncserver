@@ -88,9 +88,12 @@ rfbClientMonotonicUs(void)
 static void
 rfbClientRecordRectStats(rfbClient *client, int32_t encoding, uint16_t w, uint16_t h)
 {
+    uint64_t now_us;
+
     if (!client)
         return;
 
+    now_us = rfbClientMonotonicUs();
     client->perf_rect_total++;
     if (encoding == rfbEncodingZlib)
         client->perf_rect_zlib++;
@@ -99,7 +102,9 @@ rfbClientRecordRectStats(rfbClient *client, int32_t encoding, uint16_t w, uint16
 
     client->perf_last_rect_encoding = encoding;
     client->perf_last_rect_pixels = (uint64_t)w * (uint64_t)h;
-    client->perf_last_rect_us = rfbClientMonotonicUs();
+    if (client->perf_last_rect_us > 0 && now_us >= client->perf_last_rect_us)
+        client->perf_last_rect_delta_us = now_us - client->perf_last_rect_us;
+    client->perf_last_rect_us = now_us;
 }
 
 static void
@@ -2753,7 +2758,9 @@ HandleRFBServerMessage(rfbClient* client)
       client->GotFrameBufferUpdate(client, rect.r.x, rect.r.y, rect.r.w, rect.r.h);
     }
 
-    if (client->suppressNextIncrementalRequest) {
+    if (client->suppressIncrementalRequests) {
+      client->suppressNextIncrementalRequest = FALSE;
+    } else if (client->suppressNextIncrementalRequest) {
       client->suppressNextIncrementalRequest = FALSE;
     } else if (!SendIncrementalFramebufferUpdateRequest(client)) {
       return FALSE;

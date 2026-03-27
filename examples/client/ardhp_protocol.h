@@ -15,6 +15,15 @@ enum ard_hp_client_message_type {
   ARD_HP_MSG_SET_DISPLAY = 0x0d,
   ARD_HP_MSG_EXTENSION_0x12 = 0x12,
   ARD_HP_MSG_AUTO_PASTEBOARD = 0x15,
+  /*
+   * Adaptive/media-branch stream-configuration message built by native
+   * _RFBMediaStreamServerConfiguration before the first 0x3f2 server rect.
+   * The fixed header includes total size, version, flags, per-offer lengths,
+   * and a 16-byte media/session id, followed by AVFoundation-style plist and
+   * compressed negotiation blobs. Native flag bits include stream1/stream2
+   * supports-60fps, do-not-send-cursor, and AppleRemoteDesktop viewer flavor.
+   */
+  ARD_HP_MSG_MEDIA_STREAM_OPTIONS = 0x1c,
   ARD_HP_MSG_DISPLAY_CONFIGURATION = 0x1d,
   ARD_HP_MSG_VIEWER_INFO = 0x21,
 };
@@ -23,12 +32,14 @@ enum ard_hp_encoding_type {
   /* Apple-private FramebufferUpdate rectangle encodings observed on the wire. */
   ARD_HP_ENCODING_POINTER_REBASE = 0x44c,
   ARD_HP_ENCODING_DISPLAY_LAYOUT_SELECTOR = 0x44d,
+  ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE3 = 0x3ea,
   ARD_HP_ENCODING_CURSOR_IMAGE = 0x450,
   ARD_HP_ENCODING_DISPLAY_LAYOUT = 0x451,
   ARD_HP_ENCODING_DISPLAY_MODE = 0x453,
   ARD_HP_ENCODING_KEYBOARD_LAYOUT = 0x455,
   ARD_HP_ENCODING_DISPLAY_INFO = 0x456,
   ARD_HP_ENCODING_MEDIA_STREAM = 0x3f2,
+  ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE2 = 0x3f3,
 };
 
 enum ard_hp_auth33_constants {

@@ -17,6 +17,15 @@ enum ard_hp_client_message_type {
   ARD_HP_MSG_EXTENSION_0x10 = 0x10,
   ARD_HP_MSG_EXTENSION_0x12 = 0x12,
   ARD_HP_MSG_AUTO_PASTEBOARD = 0x15,
+  /*
+   * Adaptive/media-branch stream-configuration message built by native
+   * _RFBMediaStreamServerConfiguration before the first 0x3f2 server rect.
+   * The fixed header includes total size, version, flags, per-offer lengths,
+   * and a 16-byte media/session id, followed by AVFoundation-style plist and
+   * compressed negotiation blobs. Native flag bits include stream1/stream2
+   * supports-60fps, do-not-send-cursor, and AppleRemoteDesktop viewer flavor.
+   */
+  ARD_HP_MSG_MEDIA_STREAM_OPTIONS = 0x1c,
   /* Native keyboard-source sharing message sent by RFBShareKeyboardSourceIDCore. */
   ARD_HP_MSG_KEYBOARD_SOURCE_SHARE = 0x1a,
   ARD_HP_MSG_DISPLAY_CONFIGURATION = 0x1d,
@@ -27,12 +36,14 @@ enum ard_hp_encoding_type {
   /* Apple-private FramebufferUpdate rectangle encodings observed on the wire. */
   ARD_HP_ENCODING_POINTER_REBASE = 0x44c,
   ARD_HP_ENCODING_DISPLAY_LAYOUT_SELECTOR = 0x44d,
+  ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE3 = 0x3ea,
   ARD_HP_ENCODING_CURSOR_IMAGE = 0x450,
   ARD_HP_ENCODING_DISPLAY_LAYOUT = 0x451,
   ARD_HP_ENCODING_DISPLAY_MODE = 0x453,
   ARD_HP_ENCODING_KEYBOARD_LAYOUT = 0x455,
   ARD_HP_ENCODING_DISPLAY_INFO = 0x456,
   ARD_HP_ENCODING_MEDIA_STREAM = 0x3f2,
+  ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE2 = 0x3f3,
 };
 
 enum ard_hp_auth33_constants {
@@ -141,12 +152,11 @@ struct ard_hp_scale_factor_message {
 enum {
   ARD_HP_AUTO_FRAMEBUFFER_UPDATE_ENABLE = 1,
   /*
-   * Our current client behavior uses an all-ones interval field. Binary Ninja
-   * confirms the native 0x09 wire layout includes a u32 frame-update interval
-   * ahead of the update region, but the exact default semantics of 0xffffffff
-   * versus a concrete millisecond cadence are still under investigation.
+   * Native startup captures on the TCP framebuffer path use interval_ms=0 for
+   * the initial full-region auto-update pair. Keep the env override for
+   * experiments, but match the native default here.
    */
-  ARD_HP_AUTO_FRAMEBUFFER_UPDATE_INTERVAL_DEFAULT = 0xffffffffu,
+  ARD_HP_AUTO_FRAMEBUFFER_UPDATE_INTERVAL_DEFAULT = 0u,
 };
 
 struct ard_hp_auto_framebuffer_update_message {
@@ -441,8 +451,8 @@ static inline struct ard_hp_viewer_info_message ard_hp_make_native_viewer_info(v
   ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_SERVER_CUT_TEXT);
   ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_MISC_STATE_CHANGE);
   ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_0x1e);
-  ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_0x1f);
-  ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_0x20);
+  ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_VIEWER_CLIPBOARD_SEND);
+  ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_DROP_EVENT);
   ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_0x23);
   ard_hp_set_bitmap_bit(msg.viewer_command_bitmap, ARD_HP_VIEWER_CMD_0x51);
   return msg;

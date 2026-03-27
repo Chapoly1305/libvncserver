@@ -2,20 +2,28 @@
 
 #include <CommonCrypto/CommonCryptor.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 #include <errno.h>
+#include <limits.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "ardhp.h"
 #include "ardhp_protocol.h"
 
 static const int32_t kARDHPNativePostAuthEncodings[] = {
-    0x10,
     0x6,
+    0x10,
     (int32_t)0xffffff11u,
     ARD_HP_ENCODING_CURSOR_IMAGE,
     ARD_HP_ENCODING_POINTER_REBASE,
@@ -27,6 +35,83 @@ static const int32_t kARDHPNativePostAuthEncodings[] = {
     ARD_HP_ENCODING_DISPLAY_INFO,
 };
 static const int32_t kARDHPProModeEncoding = ARD_HP_ENCODING_MEDIA_STREAM;
+static const int32_t kARDHPAdaptiveEncodings[] = {
+    ARD_HP_ENCODING_MEDIA_STREAM,
+    ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE2,
+    ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE3,
+};
+static const uint8_t kARDHPMediaOptionsPrefix1[] = {
+    0x93, 0x59, 0x6a, 0x86, 0x45, 0x47, 0x4f, 0x65, 0x88, 0xe7, 0x8e, 0x48,
+    0xec, 0x5c, 0xa8, 0xe6, 0x2b, 0x18, 0x8c, 0x66, 0x63, 0x69, 0xe6, 0x77,
+    0x63, 0xf3, 0xfe, 0x67, 0xdd, 0x89, 0xe0, 0x49, 0x3a, 0x50, 0xd8, 0x7a,
+    0x65, 0x27, 0x19, 0xaa, 0x48, 0x60, 0x81, 0xcd, 0x8e, 0x96, 0x22, 0x6a,
+    0xf4, 0x8c, 0xc4, 0x05, 0x34, 0xce, 0xbc, 0x5c, 0xcc, 0x0d, 0xcd, 0x3d,
+    0x03, 0x95, 0x39, 0xdb, 0xbc, 0x15, 0x44, 0x70, 0xf3, 0x8f, 0xb4, 0x42,
+    0x10, 0xb2, 0x59, 0x83, 0xb0, 0xcf, 0xfa, 0x71, 0xb5, 0xed, 0x8e, 0x1e,
+    0xf2, 0xc6, 0xbd, 0xbf, 0x14, 0xf7, 0x10, 0x1a, 0x20, 0x7e, 0xaa, 0x89,
+    0x06, 0x29, 0x4e, 0x2c, 0x09, 0xc4, 0xcd, 0xb1, 0xa2, 0x8b, 0x02, 0x2b,
+};
+static const size_t kARDHPMediaOptionsPrefix1Len = sizeof(kARDHPMediaOptionsPrefix1);
+static const uint8_t kARDHPMediaOptionsMid[] = {
+    0x24, 0x4a, 0x14, 0x40, 0xd1, 0x5e, 0x68, 0x45, 0x56, 0x0e, 0xa1, 0x55,
+    0x25, 0xd1, 0xb9, 0x54, 0xcb, 0x9f, 0x49, 0x40, 0x5d, 0xa7, 0xb5, 0xa7,
+    0x28, 0x41, 0x82, 0x79, 0x6e, 0x69, 0x7f, 0x1f, 0x4a, 0x7f, 0xe5, 0x9f,
+    0xc8, 0x0b, 0x22, 0xfc, 0xaf, 0x0b, 0x05, 0x30, 0xc9, 0xbd, 0x58, 0x4f,
+    0x98, 0x67, 0x6f, 0x79, 0x5f, 0x37, 0xf9, 0xe6, 0x4f, 0x94, 0x82, 0xfe,
+    0x0a, 0x8f, 0x03, 0x5d, 0x78, 0x0b, 0x83, 0x8e, 0xe7, 0xf9, 0x2f, 0x91,
+    0xdf, 0xc3, 0x0e, 0x0a, 0x91, 0x04, 0x4e, 0x79, 0xe9, 0x91, 0x50, 0x7c,
+    0x20, 0x3e, 0xac, 0x44, 0x08, 0xd7, 0x28, 0x91,
+};
+static const size_t kARDHPMediaOptionsMidLen = sizeof(kARDHPMediaOptionsMid);
+static const uint8_t kARDHPMediaBlobMode8Raw[] = {
+    0x08, 0x01, 0x10, 0x01, 0x1a, 0x11, 0x08, 0xbb, 0xdf, 0x8e, 0xef, 0x05, 0x10, 0x00, 0x18, 0x00,
+    0x20, 0xff, 0x3c, 0x28, 0x00, 0x30, 0x00, 0x32, 0x0d, 0x56, 0x69, 0x63, 0x65, 0x72, 0x6f, 0x79,
+    0x20, 0x31, 0x2e, 0x37, 0x2e, 0x30, 0x40, 0x00, 0x4a, 0x09, 0x08, 0xea, 0x1f, 0x10, 0x00, 0x18,
+    0x80, 0x80, 0x01, 0x4a, 0x0b, 0x08, 0x00, 0x10, 0x80, 0xda, 0xc4, 0x09, 0x18, 0x80, 0x80, 0x06,
+    0x4a, 0x0a, 0x08, 0x00, 0x10, 0x80, 0xb4, 0x89, 0x13, 0x18, 0x80, 0x60, 0x4a, 0x05, 0x08, 0x01,
+    0x10, 0xab, 0x02, 0x4a, 0x0b, 0x08, 0x00, 0x10, 0x80, 0x8e, 0xce, 0x1c, 0x18, 0x80, 0x80, 0x10,
+    0x4a, 0x05, 0x08, 0x10, 0x10, 0x84, 0x20, 0x4a, 0x0b, 0x08, 0x00, 0x10, 0x80, 0x9b, 0xee, 0x02,
+    0x18, 0x80, 0x80, 0x08, 0x4a, 0x05, 0x08, 0x04, 0x10, 0xe4, 0x32, 0x68, 0x80, 0x80, 0x89, 0xb2,
+    0x80, 0xe5, 0xca, 0xb8, 0xed, 0x01, 0x70, 0x02, 0x80, 0x01, 0x00, 0x90, 0x01, 0x01,
+};
+static const size_t kARDHPMediaBlobMode8RawLen = sizeof(kARDHPMediaBlobMode8Raw);
+static const uint8_t kARDHPMediaBlobMode7Raw[] = {
+    0x08, 0x01, 0x10, 0x01, 0x2a, 0xee, 0x01, 0x08, 0xdf, 0xf6, 0xae, 0x75, 0x10, 0x00, 0x1a, 0x7d,
+    0x08, 0x7b, 0x12, 0x0a, 0x08, 0x01, 0x10, 0x01, 0x18, 0xc3, 0x87, 0x03, 0x20, 0x00, 0x12, 0x0a,
+    0x08, 0x01, 0x10, 0x02, 0x18, 0xc3, 0x87, 0x03, 0x20, 0x00, 0x12, 0x0a, 0x08, 0x01, 0x10, 0x01,
+    0x18, 0xc3, 0x87, 0x03, 0x20, 0x00, 0x12, 0x0a, 0x08, 0x01, 0x10, 0x02, 0x18, 0xc3, 0x87, 0x03,
+    0x20, 0x00, 0x1a, 0x47, 0x46, 0x4c, 0x53, 0x3b, 0x4d, 0x53, 0x3a, 0x2d, 0x31, 0x3b, 0x4c, 0x46,
+    0x3a, 0x2d, 0x31, 0x3b, 0x4c, 0x54, 0x52, 0x3b, 0x43, 0x41, 0x42, 0x41, 0x43, 0x3b, 0x50, 0x4f,
+    0x53, 0x3a, 0x30, 0x3b, 0x45, 0x4f, 0x44, 0x3a, 0x31, 0x3b, 0x48, 0x54, 0x53, 0x3a, 0x32, 0x3b,
+    0x52, 0x52, 0x3a, 0x33, 0x3b, 0x41, 0x52, 0x3a, 0x38, 0x2f, 0x35, 0x2c, 0x35, 0x2f, 0x38, 0x3b,
+    0x58, 0x52, 0x3a, 0x38, 0x2f, 0x35, 0x2c, 0x35, 0x2f, 0x38, 0x3b, 0x20, 0x01, 0x1a, 0x5c, 0x08,
+    0x64, 0x12, 0x0a, 0x08, 0x01, 0x10, 0x01, 0x18, 0xc3, 0x87, 0x03, 0x20, 0x00, 0x12, 0x0a, 0x08,
+    0x01, 0x10, 0x02, 0x18, 0xc3, 0x87, 0x03, 0x20, 0x00, 0x1a, 0x3e, 0x46, 0x4c, 0x53, 0x3b, 0x4c,
+    0x46, 0x3a, 0x2d, 0x31, 0x3b, 0x50, 0x4f, 0x53, 0x3a, 0x35, 0x3b, 0x45, 0x4f, 0x44, 0x3a, 0x31,
+    0x3b, 0x48, 0x54, 0x53, 0x3a, 0x32, 0x3b, 0x52, 0x52, 0x3a, 0x33, 0x3b, 0x50, 0x4f, 0x53, 0x45,
+    0x3a, 0x34, 0x3b, 0x41, 0x52, 0x3a, 0x38, 0x2f, 0x35, 0x2c, 0x35, 0x2f, 0x38, 0x3b, 0x58, 0x52,
+    0x3a, 0x38, 0x2f, 0x35, 0x2c, 0x35, 0x2f, 0x38, 0x3b, 0x20, 0x0e, 0x30, 0x04, 0x38, 0x01, 0x40,
+    0x3f, 0x48, 0x01, 0x60, 0x01, 0x32, 0x0d, 0x56, 0x69, 0x63, 0x65, 0x72, 0x6f, 0x79, 0x20, 0x31,
+    0x2e, 0x37, 0x2e, 0x30, 0x40, 0x00, 0x4a, 0x0a, 0x08, 0x00, 0x10, 0x80, 0xb4, 0x89, 0x13, 0x18,
+    0x80, 0x60, 0x4a, 0x05, 0x08, 0x10, 0x10, 0x84, 0x20, 0x4a, 0x09, 0x08, 0xea, 0x1f, 0x10, 0x00,
+    0x18, 0x80, 0x80, 0x01, 0x4a, 0x0b, 0x08, 0x00, 0x10, 0x80, 0x9b, 0xee, 0x02, 0x18, 0x80, 0x80,
+    0x08, 0x4a, 0x0b, 0x08, 0x00, 0x10, 0x80, 0xda, 0xc4, 0x09, 0x18, 0x80, 0x80, 0x06, 0x4a, 0x05,
+    0x08, 0x04, 0x10, 0xe4, 0x32, 0x4a, 0x05, 0x08, 0x01, 0x10, 0xab, 0x02, 0x4a, 0x0b, 0x08, 0x00,
+    0x10, 0x80, 0x8e, 0xce, 0x1c, 0x18, 0x80, 0x80, 0x10, 0x68, 0x80, 0xc0, 0xe5, 0xb6, 0x80, 0xe5,
+    0xca, 0xb8, 0xed, 0x01, 0x70, 0x02, 0x80, 0x01, 0x00, 0x90, 0x01, 0x01,
+};
+static const size_t kARDHPMediaBlobMode7RawLen = sizeof(kARDHPMediaBlobMode7Raw);
+static const uint16_t kARDHPMediaOptionsVersion = 3;
+enum {
+  kARDHPMediaOptionsFlagStream1Supports60FPS = 1u << 0,
+  kARDHPMediaOptionsFlagStream2Supports60FPS = 1u << 1,
+  kARDHPMediaOptionsFlagDoNotSendCursor = 1u << 2,
+  kARDHPMediaOptionsFlagAppleRemoteDesktopViewer = 1u << 3,
+};
+static const uint32_t kARDHPMediaOptionsFlags =
+    kARDHPMediaOptionsFlagStream1Supports60FPS |
+    kARDHPMediaOptionsFlagDoNotSendCursor;
+static const char kARDHPMediaAppVersion[] = "2125.2.1";
 
 struct ard_hp_transport_state {
   int active;
@@ -111,6 +196,430 @@ static int ard_hp_env_flag_enabled(const char *name) {
   return 1;
 }
 
+static int ard_hp_hex_nibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+  return -1;
+}
+
+static uint8_t *ard_hp_decode_hex_blob(const char *hex, size_t *out_len) {
+  size_t digits = 0;
+  size_t i;
+  size_t out_off = 0;
+  uint8_t *buf;
+  int high = -1;
+
+  if (out_len) *out_len = 0;
+  if (!hex || !*hex) return NULL;
+  for (i = 0; hex[i] != '\0'; ++i) {
+    if (ard_hp_hex_nibble(hex[i]) >= 0) {
+      digits++;
+      continue;
+    }
+    if (hex[i] == ' ' || hex[i] == '\n' || hex[i] == '\r' || hex[i] == '\t' || hex[i] == ':' || hex[i] == ',')
+      continue;
+    return NULL;
+  }
+  if ((digits & 1u) != 0 || digits == 0) return NULL;
+  buf = (uint8_t *)malloc(digits / 2u);
+  if (!buf) return NULL;
+  for (i = 0; hex[i] != '\0'; ++i) {
+    int nibble = ard_hp_hex_nibble(hex[i]);
+    if (nibble < 0) continue;
+    if (high < 0) {
+      high = nibble;
+      continue;
+    }
+    buf[out_off++] = (uint8_t)((high << 4) | nibble);
+    high = -1;
+  }
+  if (out_len) *out_len = out_off;
+  return buf;
+}
+
+static void ard_hp_cf_release(CFTypeRef value) {
+  if (value) CFRelease(value);
+}
+
+static void ard_hp_read_sysctl_string(const char *name,
+                                      char *out,
+                                      size_t out_len,
+                                      const char *fallback) {
+  size_t size = out_len;
+
+  if (!out || out_len == 0) return;
+  out[0] = '\0';
+  if (name && sysctlbyname(name, out, &size, NULL, 0) == 0 && out[0] != '\0')
+    return;
+  if (fallback && *fallback) {
+    snprintf(out, out_len, "%s", fallback);
+  }
+}
+
+static int ard_hp_uuid_upper(char out[37]) {
+  CFUUIDRef uuid = NULL;
+  CFStringRef s = NULL;
+  Boolean ok = false;
+
+  if (!out) return 0;
+  out[0] = '\0';
+  uuid = CFUUIDCreate(kCFAllocatorDefault);
+  if (!uuid) return 0;
+  s = CFUUIDCreateString(kCFAllocatorDefault, uuid);
+  if (s) {
+    ok = CFStringGetCString(s, out, 37, kCFStringEncodingUTF8);
+  }
+  if (s) CFRelease(s);
+  CFRelease(uuid);
+  if (!ok) return 0;
+  return 1;
+}
+
+static uint8_t *ard_hp_build_endpoint_info(size_t *out_len) {
+  char model[128];
+  char build[128];
+  const char *version = kARDHPMediaAppVersion;
+  size_t model_len;
+  size_t version_len;
+  size_t build_len;
+  size_t total_len;
+  uint8_t *buf;
+  size_t off = 0;
+
+  if (out_len) *out_len = 0;
+  ard_hp_read_sysctl_string("hw.model", model, sizeof(model), "MacBookAir10,1");
+  ard_hp_read_sysctl_string("kern.osversion", build, sizeof(build), "24G419");
+  model_len = strlen(model);
+  version_len = strlen(version);
+  build_len = strlen(build);
+  if (model_len > 127 || version_len > 127 || build_len > 127) return NULL;
+
+  total_len = 2 + 2 + 2 + model_len + 2 + version_len + 2 + build_len;
+  buf = (uint8_t *)malloc(total_len);
+  if (!buf) return NULL;
+
+  buf[off++] = 0x08;
+  buf[off++] = 0x00;
+  buf[off++] = 0x10;
+  buf[off++] = 0x01;
+  buf[off++] = 0x1a;
+  buf[off++] = (uint8_t)model_len;
+  memcpy(buf + off, model, model_len);
+  off += model_len;
+  buf[off++] = 0x22;
+  buf[off++] = (uint8_t)version_len;
+  memcpy(buf + off, version, version_len);
+  off += version_len;
+  buf[off++] = 0x2a;
+  buf[off++] = (uint8_t)build_len;
+  memcpy(buf + off, build, build_len);
+  off += build_len;
+
+  if (out_len) *out_len = off;
+  return buf;
+}
+
+static int ard_hp_compress_blob(const uint8_t *src,
+                                size_t src_len,
+                                uint8_t **out,
+                                size_t *out_len) {
+  uLongf cap;
+  uint8_t *buf;
+  int zret;
+
+  if (out) *out = NULL;
+  if (out_len) *out_len = 0;
+  if (!src || src_len == 0 || !out) return 0;
+
+  cap = compressBound((uLong)src_len);
+  buf = (uint8_t *)malloc((size_t)cap);
+  if (!buf) return 0;
+  zret = compress2(buf, &cap, src, (uLong)src_len, Z_BEST_COMPRESSION);
+  if (zret != Z_OK) {
+    free(buf);
+    return 0;
+  }
+  *out = buf;
+  if (out_len) *out_len = (size_t)cap;
+  return 1;
+}
+
+static uint8_t *ard_hp_make_binary_plist(int negotiator_mode,
+                                         const uint8_t *remote_info,
+                                         size_t remote_info_len,
+                                         const uint8_t *media_blob,
+                                         size_t media_blob_len,
+                                         const char *call_id,
+                                         size_t *out_len) {
+  CFMutableDictionaryRef dict = NULL;
+  CFStringRef key_remote = NULL;
+  CFStringRef key_mode = NULL;
+  CFStringRef key_blob = NULL;
+  CFStringRef key_call = NULL;
+  CFDataRef remote = NULL;
+  CFDataRef blob = NULL;
+  CFNumberRef mode = NULL;
+  CFStringRef call = NULL;
+  CFErrorRef error = NULL;
+  CFDataRef plist = NULL;
+  uint8_t *out = NULL;
+  CFIndex plist_len = 0;
+
+  if (out_len) *out_len = 0;
+  if (!remote_info || !media_blob || !call_id) return NULL;
+
+  dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 4,
+                                   &kCFTypeDictionaryKeyCallBacks,
+                                   &kCFTypeDictionaryValueCallBacks);
+  key_remote = CFStringCreateWithCString(kCFAllocatorDefault,
+                                         "avcMediaStreamOptionRemoteEndpointInfo",
+                                         kCFStringEncodingUTF8);
+  key_mode = CFStringCreateWithCString(kCFAllocatorDefault,
+                                       "avcMediaStreamNegotiatorMode",
+                                       kCFStringEncodingUTF8);
+  key_blob = CFStringCreateWithCString(kCFAllocatorDefault,
+                                       "avcMediaStreamNegotiatorMediaBlob",
+                                       kCFStringEncodingUTF8);
+  key_call = CFStringCreateWithCString(kCFAllocatorDefault,
+                                       "avcMediaStreamOptionCallID",
+                                       kCFStringEncodingUTF8);
+  remote = CFDataCreate(kCFAllocatorDefault, remote_info, (CFIndex)remote_info_len);
+  blob = CFDataCreate(kCFAllocatorDefault, media_blob, (CFIndex)media_blob_len);
+  mode = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &negotiator_mode);
+  call = CFStringCreateWithCString(kCFAllocatorDefault, call_id, kCFStringEncodingUTF8);
+  if (!dict || !key_remote || !key_mode || !key_blob || !key_call || !remote || !blob || !mode || !call)
+    goto cleanup;
+
+  CFDictionarySetValue(dict, key_remote, remote);
+  CFDictionarySetValue(dict, key_mode, mode);
+  CFDictionarySetValue(dict, key_blob, blob);
+  CFDictionarySetValue(dict, key_call, call);
+
+  plist = CFPropertyListCreateData(kCFAllocatorDefault,
+                                   dict,
+                                   kCFPropertyListBinaryFormat_v1_0,
+                                   0,
+                                   &error);
+  if (!plist) goto cleanup;
+  plist_len = CFDataGetLength(plist);
+  if (plist_len <= 0) goto cleanup;
+  out = (uint8_t *)malloc((size_t)plist_len);
+  if (!out) goto cleanup;
+  memcpy(out, CFDataGetBytePtr(plist), (size_t)plist_len);
+  if (out_len) *out_len = (size_t)plist_len;
+
+cleanup:
+  if (!out && error) {
+    CFStringRef desc = CFErrorCopyDescription(error);
+    char text[256];
+    text[0] = '\0';
+    if (desc) {
+      CFStringGetCString(desc, text, sizeof(text), kCFStringEncodingUTF8);
+      CFRelease(desc);
+    }
+    rfbClientErr("ard-hp: failed to build MediaStreamOptions plist%s%s\n",
+                 text[0] ? ": " : "",
+                 text[0] ? text : "");
+  }
+  ard_hp_cf_release(plist);
+  ard_hp_cf_release(error);
+  ard_hp_cf_release(call);
+  ard_hp_cf_release(mode);
+  ard_hp_cf_release(blob);
+  ard_hp_cf_release(remote);
+  ard_hp_cf_release(key_call);
+  ard_hp_cf_release(key_blob);
+  ard_hp_cf_release(key_mode);
+  ard_hp_cf_release(key_remote);
+  ard_hp_cf_release(dict);
+  return out;
+}
+
+static uint8_t *ard_hp_build_adaptive_media_stream_options(size_t *out_len) {
+  uint8_t *endpoint_info = NULL;
+  uint8_t *blob_mode8 = NULL;
+  uint8_t *blob_mode7 = NULL;
+  uint8_t *plist_mode8 = NULL;
+  uint8_t *plist_mode7 = NULL;
+  uint8_t *msg = NULL;
+  size_t endpoint_info_len = 0;
+  size_t blob_mode8_len = 0;
+  size_t blob_mode7_len = 0;
+  size_t plist_mode8_len = 0;
+  size_t plist_mode7_len = 0;
+  size_t total_len;
+  size_t off = 0;
+  char call_id_mode8[37];
+  char call_id_mode7[37];
+  uint16_t audio_offer_len = 0;
+  uint16_t video1_offer_len = 0;
+  uint16_t video2_offer_len = 0;
+
+  if (out_len) *out_len = 0;
+  endpoint_info = ard_hp_build_endpoint_info(&endpoint_info_len);
+  if (!endpoint_info) goto cleanup;
+  if (!ard_hp_uuid_upper(call_id_mode8) || !ard_hp_uuid_upper(call_id_mode7)) goto cleanup;
+  if (!ard_hp_compress_blob(kARDHPMediaBlobMode8Raw, kARDHPMediaBlobMode8RawLen, &blob_mode8, &blob_mode8_len))
+    goto cleanup;
+  if (!ard_hp_compress_blob(kARDHPMediaBlobMode7Raw, kARDHPMediaBlobMode7RawLen, &blob_mode7, &blob_mode7_len))
+    goto cleanup;
+  plist_mode8 = ard_hp_make_binary_plist(8, endpoint_info, endpoint_info_len,
+                                         blob_mode8, blob_mode8_len,
+                                         call_id_mode8, &plist_mode8_len);
+  plist_mode7 = ard_hp_make_binary_plist(7, endpoint_info, endpoint_info_len,
+                                         blob_mode7, blob_mode7_len,
+                                         call_id_mode7, &plist_mode7_len);
+  if (!plist_mode8 || !plist_mode7) goto cleanup;
+
+  total_len = 20 + kARDHPMediaOptionsPrefix1Len + plist_mode8_len +
+              kARDHPMediaOptionsMidLen + plist_mode7_len;
+  msg = (uint8_t *)calloc(1, total_len);
+  if (!msg) goto cleanup;
+
+  msg[0] = ARD_HP_MSG_MEDIA_STREAM_OPTIONS;
+  ard_hp_store_be16(msg + 2, (uint16_t)(total_len - 4));
+  ard_hp_store_be16(msg + 4, kARDHPMediaOptionsVersion);
+  ard_hp_store_be32(msg + 6, kARDHPMediaOptionsFlags);
+  audio_offer_len = (uint16_t)plist_mode8_len;
+  video1_offer_len = (uint16_t)plist_mode7_len;
+  video2_offer_len = 0;
+  ard_hp_store_be16(msg + 10, audio_offer_len);
+  ard_hp_store_be16(msg + 12, video1_offer_len);
+  ard_hp_store_be16(msg + 14, video2_offer_len);
+  off = 20;
+  memcpy(msg + off, kARDHPMediaOptionsPrefix1, kARDHPMediaOptionsPrefix1Len);
+  off += kARDHPMediaOptionsPrefix1Len;
+  memcpy(msg + off, plist_mode8, plist_mode8_len);
+  off += plist_mode8_len;
+  memcpy(msg + off, kARDHPMediaOptionsMid, kARDHPMediaOptionsMidLen);
+  off += kARDHPMediaOptionsMidLen;
+  memcpy(msg + off, plist_mode7, plist_mode7_len);
+  off += plist_mode7_len;
+  if (out_len) *out_len = off;
+
+cleanup:
+  free(plist_mode7);
+  free(plist_mode8);
+  free(blob_mode7);
+  free(blob_mode8);
+  free(endpoint_info);
+  return msg;
+}
+
+static uint32_t ard_hp_auto_fbu_interval_ms(void) {
+  const char *s = ard_hp_getenv_compat("VNC_ARD_HP_AUTO_FBU_INTERVAL_MS");
+  char *end = NULL;
+  long parsed;
+
+  if (!s || !*s)
+    return ARD_HP_AUTO_FRAMEBUFFER_UPDATE_INTERVAL_DEFAULT;
+
+  parsed = strtol(s, &end, 10);
+  if (!end || *end != '\0') {
+    rfbClientLog("ard-hp: ignoring invalid VNC_ARD_HP_AUTO_FBU_INTERVAL_MS='%s'\n", s);
+    return ARD_HP_AUTO_FRAMEBUFFER_UPDATE_INTERVAL_DEFAULT;
+  }
+  if (parsed < 0)
+    return ARD_HP_AUTO_FRAMEBUFFER_UPDATE_INTERVAL_DEFAULT;
+  if (parsed > INT_MAX)
+    parsed = INT_MAX;
+  return (uint32_t)parsed;
+}
+
+static void ard_hp_hex_encode(const uint8_t *src, size_t len, char *dst, size_t dst_len) {
+  static const char hex[] = "0123456789abcdef";
+  size_t i;
+
+  if (!dst || dst_len == 0) return;
+  if (!src || dst_len < (len * 2 + 1)) {
+    dst[0] = '\0';
+    return;
+  }
+  for (i = 0; i < len; ++i) {
+    dst[i * 2] = hex[(src[i] >> 4) & 0xf];
+    dst[i * 2 + 1] = hex[src[i] & 0xf];
+  }
+  dst[len * 2] = '\0';
+}
+
+static void ard_hp_socket_endpoint_json(int sock, int peer, char *ip_out, size_t ip_out_len, uint16_t *port_out) {
+  struct sockaddr_storage addr;
+  socklen_t addr_len = sizeof(addr);
+  int ok;
+
+  if (ip_out && ip_out_len > 0) ip_out[0] = '\0';
+  if (port_out) *port_out = 0;
+
+  ok = peer ? getpeername(sock, (struct sockaddr *)&addr, &addr_len) : getsockname(sock, (struct sockaddr *)&addr, &addr_len);
+  if (ok != 0) return;
+
+  if (addr.ss_family == AF_INET) {
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)&addr;
+    if (ip_out) inet_ntop(AF_INET, &sin->sin_addr, ip_out, (socklen_t)ip_out_len);
+    if (port_out) *port_out = ntohs(sin->sin_port);
+  } else if (addr.ss_family == AF_INET6) {
+    const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)&addr;
+    if (ip_out) inet_ntop(AF_INET6, &sin6->sin6_addr, ip_out, (socklen_t)ip_out_len);
+    if (port_out) *port_out = ntohs(sin6->sin6_port);
+  }
+}
+
+static void ard_hp_write_trace_sidecar(const rfbClient *client,
+                                       const uint8_t *initial_key,
+                                       size_t initial_key_len,
+                                       uint32_t counter,
+                                       const uint8_t next_key[16],
+                                       const uint8_t next_iv[16]) {
+  const char *path = ard_hp_getenv_compat("VNC_ARD_HP_TRACE_SIDECAR");
+  FILE *fp;
+  char initial_key_hex[33];
+  char next_key_hex[33];
+  char next_iv_hex[33];
+  char local_ip[INET6_ADDRSTRLEN];
+  char peer_ip[INET6_ADDRSTRLEN];
+  uint16_t local_port = 0;
+  uint16_t peer_port = 0;
+
+  if (!path || !*path || !client || !initial_key || initial_key_len < 16 || !next_key || !next_iv)
+    return;
+
+  ard_hp_hex_encode(initial_key, 16, initial_key_hex, sizeof(initial_key_hex));
+  ard_hp_hex_encode(next_key, 16, next_key_hex, sizeof(next_key_hex));
+  ard_hp_hex_encode(next_iv, 16, next_iv_hex, sizeof(next_iv_hex));
+  ard_hp_socket_endpoint_json(client->sock, 0, local_ip, sizeof(local_ip), &local_port);
+  ard_hp_socket_endpoint_json(client->sock, 1, peer_ip, sizeof(peer_ip), &peer_port);
+
+  fp = fopen(path, "w");
+  if (!fp) {
+    rfbClientErr("ard-hp: failed to write trace sidecar '%s' (%d: %s)\n", path, errno, strerror(errno));
+    return;
+  }
+
+  fprintf(fp,
+          "{\n"
+          "  \"schema\": \"ardhp-trace-sidecar-v1\",\n"
+          "  \"local_ip\": \"%s\",\n"
+          "  \"local_port\": %u,\n"
+          "  \"peer_ip\": \"%s\",\n"
+          "  \"peer_port\": %u,\n"
+          "  \"initial_session_key_hex\": \"%s\",\n"
+          "  \"rekey_counter\": %u,\n"
+          "  \"rekey_key_hex\": \"%s\",\n"
+          "  \"rekey_iv_hex\": \"%s\"\n"
+          "}\n",
+          local_ip,
+          (unsigned)local_port,
+          peer_ip,
+          (unsigned)peer_port,
+          initial_key_hex,
+          (unsigned)counter,
+          next_key_hex,
+          next_iv_hex);
+  fclose(fp);
+  rfbClientLog("ard-hp: wrote trace sidecar %s\n", path);
+}
+
 static const char *ard_hp_encoding_name(int32_t encoding) {
   switch ((uint32_t)encoding) {
     case 0x00000006u: return "Zlib";
@@ -125,7 +634,9 @@ static const char *ard_hp_encoding_name(int32_t encoding) {
     case 0x00000453u: return "ARDVendorKeysym";
     case 0x00000455u: return "ARDKeyboardInputSource";
     case 0x00000456u: return "ARDDeviceInfo";
+    case 0x000003eau: return "ARDRFBMediaStreamMessage3";
     case 0x000003f2u: return "ARDRFBMediaStreamMessage1";
+    case 0x000003f3u: return "ARDRFBMediaStreamMessage2";
     default: return "Unknown";
   }
 }
@@ -574,6 +1085,9 @@ static rfbBool ard_hp_transport_write(rfbClient *client, const char *buf, unsign
 
   if (!state || !buf) return FALSE;
   st = &state->transport;
+  if (n > 0 && ard_hp_env_flag_enabled("VNC_ARD_HP_TRACE_CLIENT_MSGS")) {
+    rfbClientLog("ard-hp: transport send msg=0x%02x len=%u\n", (unsigned)((const uint8_t *)buf)[0], n);
+  }
   plain_len = ((size_t)n + 22u + 15u) & ~((size_t)15u);
   if (!ard_hp_ensure_buf(&st->send_plain_buf, &st->send_plain_cap, plain_len)) goto fail;
   if (!ard_hp_ensure_buf(&st->send_cipher_buf, &st->send_cipher_cap, plain_len)) goto fail;
@@ -653,6 +1167,8 @@ rfbBool rfbClientRunARDHPPrelude(rfbClient *client) {
     struct ard_hp_set_mode_message msg = ard_hp_make_native_prelude_set_mode();
     if (!send_blob(client, &msg, sizeof(msg), "ard-hp SetModeMessage")) return FALSE;
   }
+  if (!rfbClientARDHPSendInitialDisplayConfiguration(client)) return FALSE;
+  if (!rfbClientARDHPSendPostAuthEncodings(client)) return FALSE;
   return TRUE;
 }
 
@@ -708,6 +1224,7 @@ rfbBool rfbClientARDHPDecryptRekeyRecord(const rfbClient *client, const uint8_t 
   *counter = ard_hp_read_be_u32(record);
   if (!aes_ecb_decrypt_block(session_key, record + 4, next_key)) return FALSE;
   if (!aes_ecb_decrypt_block(session_key, record + 20, next_iv)) return FALSE;
+  ard_hp_write_trace_sidecar(client, session_key, session_key_len, *counter, next_key, next_iv);
   return TRUE;
 }
 
@@ -773,22 +1290,42 @@ rfbBool rfbClientARDHPSendSetDisplayMessage(rfbClient *client) {
 }
 
 rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client) {
-  int32_t encodings[(sizeof(kARDHPNativePostAuthEncodings) / sizeof(kARDHPNativePostAuthEncodings[0])) + 2];
+  int32_t encodings[(sizeof(kARDHPNativePostAuthEncodings) / sizeof(kARDHPNativePostAuthEncodings[0])) + 4];
   size_t count = 0;
   size_t i;
   int add_promode = ard_hp_env_flag_enabled("VNC_ARD_HP_ADD_PROMODE_ENCODING");
   int prefer_promode = ard_hp_env_flag_enabled("VNC_ARD_HP_PREFER_PROMODE_ENCODING");
+  int adaptive_mode = ard_hp_env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
   int omit_44c = ard_hp_env_flag_enabled("VNC_ARD_HP_OMIT_44C");
   int omit_44d = ard_hp_env_flag_enabled("VNC_ARD_HP_OMIT_44D");
+  int disable_zlib = ard_hp_env_flag_enabled("VNC_DISABLE_ZLIB");
+  int disable_zrle = ard_hp_env_flag_enabled("VNC_DISABLE_ZRLE");
 
   if (!client) return FALSE;
+  if (adaptive_mode) {
+    add_promode = 1;
+    prefer_promode = 1;
+    rfbClientLog("ard-hp: adaptive/media branch also uses client message 0x1c MediaStreamOptions; "
+                 "advertising the native 0x3f2/0x3f3/0x3ea media family\n");
+  }
   if (add_promode && prefer_promode) {
-    encodings[count++] = kARDHPProModeEncoding;
-    rfbClientLog("ard-hp: prepending ProMode SetEncodings capability 0x%03x\n",
-                 kARDHPProModeEncoding);
+    if (adaptive_mode) {
+      for (i = 0; i < sizeof(kARDHPAdaptiveEncodings) / sizeof(kARDHPAdaptiveEncodings[0]); ++i) {
+        encodings[count++] = kARDHPAdaptiveEncodings[i];
+        rfbClientLog("ard-hp: prepending adaptive SetEncodings capability 0x%03x\n",
+                     (unsigned)kARDHPAdaptiveEncodings[i]);
+      }
+    } else {
+      encodings[count++] = kARDHPProModeEncoding;
+      rfbClientLog("ard-hp: prepending %s SetEncodings capability 0x%03x\n",
+                   adaptive_mode ? "adaptive" : "ProMode",
+                   kARDHPProModeEncoding);
+    }
   }
   for (i = 0; i < sizeof(kARDHPNativePostAuthEncodings) / sizeof(kARDHPNativePostAuthEncodings[0]); ++i) {
-    if (ard_hp_env_flag_enabled("VNC_DISABLE_ZLIB") && kARDHPNativePostAuthEncodings[i] == 0x6)
+    if (disable_zlib && kARDHPNativePostAuthEncodings[i] == 0x6)
+      continue;
+    if (disable_zrle && kARDHPNativePostAuthEncodings[i] == 0x10)
       continue;
     if (omit_44c && kARDHPNativePostAuthEncodings[i] == ARD_HP_ENCODING_POINTER_REBASE)
       continue;
@@ -800,7 +1337,8 @@ rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client) {
     encodings[count++] = kARDHPNativePostAuthEncodings[i];
   }
   if (add_promode && !prefer_promode) {
-    rfbClientLog("ard-hp: adding ProMode SetEncodings capability 0x%03x\n",
+    rfbClientLog("ard-hp: adding %s SetEncodings capability 0x%03x\n",
+                 adaptive_mode ? "adaptive" : "ProMode",
                  kARDHPProModeEncoding);
   }
   ard_hp_log_post_auth_encodings(encodings, count);
@@ -814,6 +1352,62 @@ rfbBool rfbClientARDHPSendAutoPasteboardCommand(rfbClient *client, uint16_t sele
   return WriteToRFBServer(client, (const char *)&msg, sizeof(msg));
 }
 
+rfbBool rfbClientARDHPSendMediaStreamOptionsHex(rfbClient *client, const char *hex) {
+  uint8_t *buf;
+  size_t len = 0;
+  rfbBool ok;
+
+  if (!client || !hex || !*hex) return TRUE;
+  buf = ard_hp_decode_hex_blob(hex, &len);
+  if (!buf || len == 0) {
+    free(buf);
+    rfbClientErr("ard-hp: invalid VNC_ARD_HP_MEDIA_STREAM_OPTIONS_HEX payload\n");
+    return FALSE;
+  }
+  if (buf[0] != ARD_HP_MSG_MEDIA_STREAM_OPTIONS) {
+    rfbClientErr("ard-hp: media-stream options blob must start with 0x%02x, got 0x%02x\n",
+                 ARD_HP_MSG_MEDIA_STREAM_OPTIONS, buf[0]);
+    free(buf);
+    return FALSE;
+  }
+  rfbClientLog("ard-hp: sending MediaStreamOptions 0x1c (%lu bytes)\n", (unsigned long)len);
+  ok = WriteToRFBServer(client, (const char *)buf, (unsigned int)len);
+  free(buf);
+  return ok;
+}
+
+rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client) {
+  uint8_t *buf;
+  size_t len = 0;
+  rfbBool ok;
+  uint16_t audio_offer_len;
+  uint16_t video1_offer_len;
+  uint16_t video2_offer_len;
+  uint32_t flags;
+
+  if (!client) return FALSE;
+  buf = ard_hp_build_adaptive_media_stream_options(&len);
+  if (!buf || len == 0) {
+    free(buf);
+    rfbClientErr("ard-hp: failed to build adaptive MediaStreamOptions 0x1c payload\n");
+    return FALSE;
+  }
+  audio_offer_len = len >= 12 ? ard_hp_read_be_u16(buf + 10) : 0;
+  video1_offer_len = len >= 14 ? ard_hp_read_be_u16(buf + 12) : 0;
+  video2_offer_len = len >= 16 ? ard_hp_read_be_u16(buf + 14) : 0;
+  flags = len >= 10 ? ard_hp_read_be_u32(buf + 6) : 0;
+  rfbClientLog("ard-hp: sending adaptive MediaStreamOptions 0x1c (%lu bytes version=%u flags=0x%08x audio_offer=%u video1_offer=%u video2_offer=%u)\n",
+               (unsigned long)len,
+               len >= 6 ? (unsigned)ard_hp_read_be_u16(buf + 4) : 0,
+               (unsigned)flags,
+               (unsigned)audio_offer_len,
+               (unsigned)video1_offer_len,
+               (unsigned)video2_offer_len);
+  ok = WriteToRFBServer(client, (const char *)buf, (unsigned int)len);
+  free(buf);
+  return ok;
+}
+
 rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale) {
   struct ard_hp_scale_factor_message msg = ard_hp_make_scale_factor_message(scale);
   rfbClientLog("ard-hp: using scale factor %.6f\n", scale);
@@ -821,19 +1415,17 @@ rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale) {
 }
 
 rfbBool rfbClientARDHPSendAutoFramebufferUpdate(rfbClient *client, uint16_t width, uint16_t height) {
-  uint8_t buf[16];
+  uint32_t interval_ms = ard_hp_auto_fbu_interval_ms();
+  struct ard_hp_auto_framebuffer_update_message msg =
+      ard_hp_make_auto_framebuffer_update_message(
+          ARD_HP_AUTO_FRAMEBUFFER_UPDATE_ENABLE,
+          interval_ms,
+          0, 0, width, height);
 
-  memset(buf, 0, sizeof(buf));
-  buf[0] = ARD_HP_MSG_AUTO_FRAMEBUFFER_UPDATE;
-  buf[3] = 0x01;
-  memset(buf + 4, 0xff, 4);
-  buf[12] = (uint8_t)((width >> 8) & 0xff);
-  buf[13] = (uint8_t)(width & 0xff);
-  buf[14] = (uint8_t)((height >> 8) & 0xff);
-  buf[15] = (uint8_t)(height & 0xff);
-  rfbClientLog("ard-hp: sending AutoFrameBufferUpdate region=%ux%u\n",
+  rfbClientLog("ard-hp: sending AutoFrameBufferUpdate interval=%u region=%ux%u\n",
+               (unsigned)interval_ms,
                (unsigned)width, (unsigned)height);
-  return WriteToRFBServer(client, (const char *)buf, sizeof(buf));
+  return WriteToRFBServer(client, (const char *)&msg, sizeof(msg));
 }
 
 rfbBool rfbClientARDHPResizeFramebufferIfNeeded(rfbClient *client,

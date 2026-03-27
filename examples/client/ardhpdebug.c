@@ -24,7 +24,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #if defined(__has_include)
@@ -121,6 +124,12 @@ struct ard_hp_session_state {
   int dynamic_refresh_queued_for_request;
   int dynamic_refresh_retries;
   long long dynamic_refresh_requested_ms;
+  int media_stream_active;
+  uint16_t media_stream_version;
+  uint16_t media_stream_message_type;
+  uint16_t media_stream_base_udp_port;
+  uint16_t media_stream_next_udp_port;
+  uint16_t media_stream_count;
 };
 
 static struct ard_hp_frame_stats g_frame = {0};
@@ -177,6 +186,9 @@ struct ard_hp_live_view_state {
   int present_per_rect;
   long long last_present_us;
   long long last_input_us;
+  long long last_update_us;
+  long long motion_mode_until_us;
+  long long pending_since_us;
   struct ard_hp_cursor_cache_entry cursor_cache[ARDHPDEBUG_CURSOR_CACHE_MAX];
   uint32_t cursor_current_cache_id;
   int cursor_visible;
@@ -211,15 +223,20 @@ static void redraw_live_view(rfbClient *client);
 static void invalidate_live_view_runtime_size(void);
 static int maybe_present_live_view_if_due(rfbClient *client, int force);
 static void note_live_view_input(void);
+static void note_live_view_update_activity(rfbClient *client, long long now_us,
+                                           unsigned long long frame_pixels);
+static int live_view_motion_active(long long now_us);
 static long long monotonic_us(void);
 static long long monotonic_ms(void);
 static uint16_t read_be_u16(const uint8_t *p);
+static uint32_t read_be_u32(const uint8_t *p);
 static uint16_t ard_hp_backing_width(rfbClient *client);
 static uint16_t ard_hp_backing_height(rfbClient *client);
 static uint16_t ard_hp_display_width(rfbClient *client);
 static uint16_t ard_hp_display_height(rfbClient *client);
 static uint16_t ard_hp_request_width(rfbClient *client);
 static uint16_t ard_hp_request_height(rfbClient *client);
+static int ard_hp_adaptive_target_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
 static int ard_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
                                              const char *reason);
 static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force);
@@ -234,9 +251,12 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
 static int ard_hp_dynamic_target_materially_diff(uint16_t a_w, uint16_t a_h,
                                                  uint16_t b_w, uint16_t b_h);
 static int ard_hp_resize_transition_active(void);
+static const char *ard_hp_probe_encoding_name(uint32_t encoding);
+static void ard_hp_maybe_probe_media_input(rfbClient *client);
 #endif
 
 static int ard_hp_should_suppress_incremental(void) {
+  if (g_hp.media_stream_active) return 1;
 #if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) return 0;
 #endif
@@ -250,6 +270,7 @@ static void reset_live_view_pending_present(void) {
   g_live.pending_y = 0;
   g_live.pending_w = 0;
   g_live.pending_h = 0;
+  g_live.pending_since_us = 0;
 }
 
 static void arm_live_view_refresh_present(void) {
@@ -338,6 +359,7 @@ static int live_view_dynamic_resize_stable(rfbClient *client) {
 static void queue_live_view_present(int x, int y, int w, int h) {
   int x2;
   int y2;
+  long long now_us = monotonic_us();
 
   if (w <= 0 || h <= 0) return;
   if (!g_live.has_pending_present) {
@@ -346,8 +368,10 @@ static void queue_live_view_present(int x, int y, int w, int h) {
     g_live.pending_y = y;
     g_live.pending_w = w;
     g_live.pending_h = h;
+    g_live.pending_since_us = now_us;
     return;
   }
+  if (g_live.pending_since_us <= 0) g_live.pending_since_us = now_us;
 
   x2 = x + w;
   y2 = y + h;
@@ -376,9 +400,15 @@ static int live_view_recent_input_active(long long now_us) {
   return elapsed_us >= 0 && elapsed_us < 100000;
 }
 
+static int live_view_motion_active(long long now_us) {
+  if (now_us <= 0 || g_live.motion_mode_until_us <= 0) return 0;
+  return now_us <= g_live.motion_mode_until_us;
+}
+
 static long long live_view_present_interval_us(long long now_us) {
   if (ard_hp_resize_transition_active()) return 8333;
   if (live_view_recent_input_active(now_us)) return 8333;
+  if (live_view_motion_active(now_us)) return 16666;
   return 33333;
 }
 
@@ -400,7 +430,6 @@ static int maybe_present_live_view_if_due(rfbClient *client, int force) {
   if (!g_runtime.live_view || !client || !g_live.has_pending_present) return 1;
   if (g_live.awaiting_refresh_present) return 1;
   if (g_live.present_per_rect) return 1;
-  if (!force && client->buffered > 0) return 1;
   if (!force) {
     now_us = monotonic_us();
     if (now_us > 0) {
@@ -409,6 +438,14 @@ static int maybe_present_live_view_if_due(rfbClient *client, int force) {
           g_live.last_present_us > 0 &&
           g_live.last_present_us < g_live.last_input_us) {
         min_interval_us = 0;
+      }
+    }
+    if (client->buffered > 0) {
+      if (!live_view_motion_active(now_us)) return 1;
+      if (g_live.pending_since_us > 0 &&
+          now_us > g_live.pending_since_us &&
+          now_us - g_live.pending_since_us < min_interval_us / 2) {
+        return 1;
       }
     }
     if (g_live.last_present_us > 0 && now_us > 0) {
@@ -462,6 +499,29 @@ static int update_live_view_texture_rect(rfbClient *client, const SDL_Rect *rect
 
 static void note_live_view_input(void) {
   g_live.last_input_us = monotonic_us();
+}
+
+static void note_live_view_update_activity(rfbClient *client, long long now_us,
+                                           unsigned long long frame_pixels) {
+  unsigned long long screen_px = 0;
+  long long delta_us = 0;
+
+  if (!client || !g_runtime.live_view || now_us <= 0 || frame_pixels == 0) return;
+  screen_px = (unsigned long long)ard_hp_request_width(client) *
+              (unsigned long long)ard_hp_request_height(client);
+  if (g_live.last_update_us > 0 && now_us > g_live.last_update_us) {
+    delta_us = now_us - g_live.last_update_us;
+    if (delta_us > 0 && delta_us <= 250000) {
+      g_live.motion_mode_until_us = now_us + 250000;
+    }
+  }
+  if (screen_px > 0 && frame_pixels >= screen_px / 8ULL) {
+    long long extend_until = now_us + 350000;
+    if (extend_until > g_live.motion_mode_until_us) {
+      g_live.motion_mode_until_us = extend_until;
+    }
+  }
+  g_live.last_update_us = now_us;
 }
 
 #if !ARDHPDEBUG_MINIMAL_RELEASE
@@ -588,6 +648,7 @@ static void draw_live_view_perf_overlay(rfbClient *client, int panel_x, int pane
   static double zrle_rate = 0.0;
   static double present_rate = 0.0;
   static double lag_ms = 0.0;
+  static double rect_delta_ms = 0.0;
   static double avg_lag_ms = 0.0;
   static double max_lag_ms = 0.0;
   static double jitter_ms = 0.0;
@@ -631,6 +692,7 @@ static void draw_live_view_perf_overlay(rfbClient *client, int panel_x, int pane
       zrle_rate = (double)(client->perf_rect_zrle - last_rect_zrle) / seconds;
       present_rate = (double)(client->perf_present_total - last_present_total) / seconds;
       lag_ms = (double)client->perf_last_rect_to_present_us / 1000.0;
+      rect_delta_ms = (double)client->perf_last_rect_delta_us / 1000.0;
       rect_hist[hist_head] = rect_rate;
       present_hist[hist_head] = present_rate;
       zlib_hist[hist_head] = zlib_rate;
@@ -669,11 +731,14 @@ static void draw_live_view_perf_overlay(rfbClient *client, int panel_x, int pane
   snprintf(line, sizeof(line), "zlib %.1f zrle %.1f", zlib_rate, zrle_rate);
   draw_overlay_text(g_live.renderer, panel_x, panel_y + 34, line, 255, 220, 96);
 
-  snprintf(line, sizeof(line), "avg %.1f max %.1f", avg_lag_ms, max_lag_ms);
+  snprintf(line, sizeof(line), "upd %.1fms avg %.1f", rect_delta_ms, avg_lag_ms);
   draw_overlay_text(g_live.renderer, panel_x, panel_y + 68, line, 128, 255, 160);
 
-  snprintf(line, sizeof(line), "lag %.1f jit %.1f", lag_ms, jitter_ms);
+  snprintf(line, sizeof(line), "lag %.1f max %.1f", lag_ms, max_lag_ms);
   draw_overlay_text(g_live.renderer, panel_x, panel_y + 102, line, 255, 128, 196);
+
+  snprintf(line, sizeof(line), "jit %.1f", jitter_ms);
+  draw_overlay_text(g_live.renderer, panel_x + 448, panel_y + 46, line, 255, 128, 196);
 
   snprintf(line, sizeof(line), "last %s %llupx",
            live_view_perf_encoding_label(client->perf_last_rect_encoding),
@@ -928,7 +993,8 @@ static unsigned int main_loop_wait_usecs(void) {
      * sub-millisecond socket poll interval. */
     if (!g_live.present_per_rect && g_live.has_pending_present) {
       now_us = monotonic_us();
-      if (g_live.last_present_us <= 0 || now_us <= 0) return 0;
+      if (now_us <= 0) return 0;
+      if (g_live.last_present_us <= 0) return 0;
       elapsed_us = now_us - g_live.last_present_us;
       if (elapsed_us < 0) elapsed_us = 0;
       due_in_us = live_view_present_interval_us(now_us) - elapsed_us;
@@ -1077,6 +1143,225 @@ static uint32_t read_be_u32(const uint8_t *p) {
          (uint32_t)p[3];
 }
 
+static void ard_hp_hex_encode(const uint8_t *src, size_t len, char *dst, size_t dst_len) {
+  static const char hex[] = "0123456789abcdef";
+  size_t i;
+
+  if (!dst || dst_len == 0) return;
+  if (!src || len == 0) {
+    dst[0] = '\0';
+    return;
+  }
+  if (dst_len < len * 2 + 1) {
+    dst[0] = '\0';
+    return;
+  }
+  for (i = 0; i < len; ++i) {
+    dst[i * 2] = hex[(src[i] >> 4) & 0xf];
+    dst[i * 2 + 1] = hex[src[i] & 0xf];
+  }
+  dst[len * 2] = '\0';
+}
+
+static void ard_hp_dump_media_init_payload(const uint8_t *payload, size_t total_len) {
+  const char *path = getenv("VNC_ARD_HP_MEDIA_INIT_DUMP");
+  char *hex = NULL;
+  FILE *fp;
+
+  if (!path || !*path || !payload || total_len == 0) return;
+  hex = (char *)malloc(total_len * 2 + 1);
+  if (!hex) return;
+  ard_hp_hex_encode(payload, total_len, hex, total_len * 2 + 1);
+  fp = fopen(path, "w");
+  if (!fp) {
+    rfbClientErr("ard-hp: failed to open media-init dump path %s\n", path);
+    free(hex);
+    return;
+  }
+  fprintf(fp, "%s\n", hex);
+  fclose(fp);
+  rfbClientLog("ard-hp: wrote media-init payload dump %s (%lu bytes)\n",
+               path, (unsigned long)total_len);
+  free(hex);
+}
+
+static void ard_hp_dump_media_packet(uint32_t encoding, const uint8_t *payload, size_t total_len) {
+  const char *dir = getenv("VNC_ARD_HP_MEDIA_PACKET_DUMP_DIR");
+  const char *name = ard_hp_probe_encoding_name(encoding);
+  static unsigned long packet_index = 0;
+  char path[PATH_MAX];
+  char *hex = NULL;
+  FILE *fp = NULL;
+
+  if (!dir || !*dir || !payload || total_len == 0) return;
+  if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    rfbClientErr("ard-hp: failed to create media packet dump dir '%s': %s\n",
+                 dir, strerror(errno));
+    return;
+  }
+  ++packet_index;
+  snprintf(path, sizeof(path), "%s/%04lu_%s.hex", dir, packet_index, name);
+  hex = (char *)malloc(total_len * 2 + 1);
+  if (!hex) return;
+  ard_hp_hex_encode(payload, total_len, hex, total_len * 2 + 1);
+  fp = fopen(path, "w");
+  if (!fp) {
+    rfbClientErr("ard-hp: failed to open media packet dump '%s': %s\n",
+                 path, strerror(errno));
+    free(hex);
+    return;
+  }
+  fputs(hex, fp);
+  fputc('\n', fp);
+  fclose(fp);
+  free(hex);
+}
+
+static size_t ard_hp_find_bytes(const uint8_t *buf, size_t len, const uint8_t *needle, size_t needle_len) {
+  size_t i;
+
+  if (!buf || !needle || needle_len == 0 || len < needle_len) return (size_t)-1;
+  for (i = 0; i + needle_len <= len; ++i) {
+    if (memcmp(buf + i, needle, needle_len) == 0) return i;
+  }
+  return (size_t)-1;
+}
+
+static void ard_hp_log_media_init_payload(const uint8_t *payload, size_t total_len) {
+  static const uint8_t kBplist[] = "bplist00";
+  static const uint8_t kZlib[] = {0x78, 0xda};
+  size_t plist_off;
+  size_t zlib_off;
+
+  if (!payload || total_len < 12) return;
+  plist_off = ard_hp_find_bytes(payload, total_len, kBplist, sizeof(kBplist) - 1);
+  zlib_off = ard_hp_find_bytes(payload, total_len, kZlib, sizeof(kZlib));
+
+  if (total_len >= 38 && read_be_u16(payload + 0) == 36 && read_be_u16(payload + 2) == 1 &&
+      read_be_u16(payload + 4) == 1) {
+    rfbClientLog("ard-hp: media-init stage1 header len=%u version=%u type=%u field6=%u field8=%u field10=%u\n",
+                 (unsigned)read_be_u16(payload + 0),
+                 (unsigned)read_be_u16(payload + 2),
+                 (unsigned)read_be_u16(payload + 4),
+                 (unsigned)read_be_u16(payload + 6),
+                 (unsigned)read_be_u16(payload + 8),
+                 (unsigned)read_be_u16(payload + 10));
+    return;
+  }
+
+  if (total_len >= 32 && read_be_u16(payload + 0) >= 0x0200 && read_be_u16(payload + 2) == 2 &&
+      read_be_u16(payload + 4) == 2) {
+    rfbClientLog(
+        "ard-hp: media-init stage2 header len=%u version=%u type=%u stream_count=%u next_field=%u u32_12=%u plist_off=%ld zlib_off=%ld\n",
+        (unsigned)read_be_u16(payload + 0),
+        (unsigned)read_be_u16(payload + 2),
+        (unsigned)read_be_u16(payload + 4),
+        (unsigned)read_be_u16(payload + 8),
+        (unsigned)read_be_u16(payload + 10),
+        (unsigned)read_be_u32(payload + 12),
+        plist_off == (size_t)-1 ? -1L : (long)plist_off,
+        zlib_off == (size_t)-1 ? -1L : (long)zlib_off);
+    if (plist_off != (size_t)-1 && plist_off + 32 <= total_len) {
+      char prefix[65];
+      ard_hp_hex_encode(payload + plist_off, 32, prefix, sizeof(prefix));
+      rfbClientLog("ard-hp: media-init stage2 plist prefix=%s\n", prefix);
+    }
+    if (zlib_off != (size_t)-1 && zlib_off + 32 <= total_len) {
+      char prefix[65];
+      ard_hp_hex_encode(payload + zlib_off, 32, prefix, sizeof(prefix));
+      rfbClientLog("ard-hp: media-init stage2 zlib prefix=%s\n", prefix);
+    }
+  }
+}
+
+static const char *ard_hp_probe_encoding_name(uint32_t encoding) {
+  switch (encoding) {
+    case 0x44f:
+      return "ARDSetEncryptionMessage";
+    case 0x450:
+      return "ARDCursorImage";
+    case 0x451:
+      return "ARDDisplayLayout";
+    case 0x453:
+      return "ARDVendorKeysym";
+    case 0x455:
+      return "ARDKeyboardInputSource";
+    case 0x456:
+      return "ARDDeviceInfo";
+    case 0x3ea:
+      return "ARDRFBMediaStreamMessage3";
+    case 0x3f2:
+      return "ARDRFBMediaStreamMessage1";
+    case 0x3f3:
+      return "ARDRFBMediaStreamMessage2";
+    default:
+      return "UnknownProbeEncoding";
+  }
+}
+
+static void ard_hp_maybe_probe_media_input(rfbClient *client) {
+  int center_x;
+  int center_y;
+
+  if (!client) return;
+  if (!env_flag_enabled("VNC_ARD_HP_MEDIA_PROBE_INPUT")) return;
+  if (!g_hp.media_stream_active) return;
+  if (g_hp.media_stream_message_type < 2) return;
+
+  center_x = client->width > 0 ? client->width / 2 : 960;
+  center_y = client->height > 0 ? client->height / 2 : 540;
+  rfbClientLog("ard-hp: probing adaptive media with pointer moves around %d,%d\n",
+               center_x, center_y);
+  SendPointerEvent(client, center_x, center_y, 0);
+  SendPointerEvent(client, center_x + 24, center_y + 18, 0);
+  SendPointerEvent(client, center_x - 24, center_y - 18, 0);
+  SendPointerEvent(client, center_x, center_y, 0);
+}
+
+static int ard_hp_maybe_pump_media_input(rfbClient *client) {
+  static long long last_probe_ms = 0;
+  static unsigned int phase = 0;
+  long long now_ms;
+  int center_x;
+  int center_y;
+  int dx;
+  int dy;
+
+  if (!client) return 1;
+  if (!env_flag_enabled("VNC_ARD_HP_MEDIA_PROBE_INPUT_LOOP")) return 1;
+  if (!g_hp.media_stream_active) return 1;
+  if (g_hp.media_stream_message_type < 2) return 1;
+
+  now_ms = monotonic_ms();
+  if (now_ms <= 0) return 1;
+  if (last_probe_ms > 0 && now_ms - last_probe_ms < 250) return 1;
+  last_probe_ms = now_ms;
+
+  center_x = client->width > 0 ? client->width / 2 : 960;
+  center_y = client->height > 0 ? client->height / 2 : 540;
+  switch (phase & 3u) {
+    case 0:
+      dx = 32;
+      dy = 20;
+      break;
+    case 1:
+      dx = -32;
+      dy = 20;
+      break;
+    case 2:
+      dx = -32;
+      dy = -20;
+      break;
+    default:
+      dx = 32;
+      dy = -20;
+      break;
+  }
+  phase++;
+  SendPointerEvent(client, center_x + dx, center_y + dy, 0);
+  return 1;
+}
+
 static uint32_t ard_hp_dynamic_min_delta(void) {
   return g_runtime.dynamic_min_delta;
 }
@@ -1149,9 +1434,53 @@ static uint16_t ard_hp_display_height(rfbClient *client) {
   return client ? (uint16_t)client->height : 0;
 }
 
+static int ard_hp_adaptive_target_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h) {
+  uint16_t target_w = 0;
+  uint16_t target_h = 0;
+
+  if (!client || !out_w || !out_h) return 0;
+
+#if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_runtime.live_view && g_live.renderer) {
+    int output_w = 0;
+    int output_h = 0;
+
+    if (SDL_GetRendererOutputSize(g_live.renderer, &output_w, &output_h) == 0 &&
+        output_w > 0 && output_h > 0) {
+      if (output_w > 0xffff) output_w = 0xffff;
+      if (output_h > 0xffff) output_h = 0xffff;
+      *out_w = (uint16_t)output_w;
+      *out_h = (uint16_t)output_h;
+      return 1;
+    }
+  }
+#endif
+
+  if (live_view_runtime_display_size(client, &target_w, &target_h) &&
+      target_w != 0 && target_h != 0) {
+    *out_w = target_w;
+    *out_h = target_h;
+    return 1;
+  }
+
+  target_w = ard_hp_display_width(client);
+  target_h = ard_hp_display_height(client);
+  if (target_w == 0 || target_h == 0) return 0;
+  *out_w = target_w;
+  *out_h = target_h;
+  return 1;
+}
+
 static uint16_t ard_hp_request_width(rfbClient *client) {
+  uint16_t adaptive_w = 0;
+  uint16_t adaptive_h = 0;
   uint16_t w = ard_hp_backing_width(client);
 
+  if (g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE") &&
+      ard_hp_adaptive_target_size(client, &adaptive_w, &adaptive_h)) {
+    (void)adaptive_h;
+    return adaptive_w;
+  }
   if (w != 0) return w;
 #if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) {
@@ -1163,8 +1492,15 @@ static uint16_t ard_hp_request_width(rfbClient *client) {
 }
 
 static uint16_t ard_hp_request_height(rfbClient *client) {
+  uint16_t adaptive_w = 0;
+  uint16_t adaptive_h = 0;
   uint16_t h = ard_hp_backing_height(client);
 
+  if (g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE") &&
+      ard_hp_adaptive_target_size(client, &adaptive_w, &adaptive_h)) {
+    (void)adaptive_w;
+    return adaptive_h;
+  }
   if (h != 0) return h;
 #if defined(ARDHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) {
@@ -1206,7 +1542,28 @@ static int send_runtime_display_configuration_blob(rfbClient *client,
   return 1;
 }
 
-static double ard_hp_runtime_scale_factor(void) {
+static double ard_hp_runtime_scale_factor(rfbClient *client) {
+  if (g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE") && client) {
+    uint16_t target_w = 0;
+    uint16_t target_h = 0;
+    uint16_t backing_w = ard_hp_backing_width(client);
+    uint16_t backing_h = ard_hp_backing_height(client);
+
+    if (backing_w != 0 && backing_h != 0 &&
+        ard_hp_adaptive_target_size(client, &target_w, &target_h) &&
+        target_w != 0 && target_h != 0) {
+      double scale_x = (double)target_w / (double)backing_w;
+      double scale_y = (double)target_h / (double)backing_h;
+      double scale = (scale_x + scale_y) * 0.5;
+
+      if (scale_x > 0.0 && scale_y > 0.0) {
+        double delta = scale_x - scale_y;
+        if (delta < 0.0) delta = -delta;
+        if (delta > 0.01) scale = scale_x < scale_y ? scale_x : scale_y;
+      }
+      if (scale > 0.0) return scale;
+    }
+  }
 #if defined(ARDHPDEBUG_HAS_SDL)
   int window_w = 0;
   int window_h = 0;
@@ -1247,8 +1604,11 @@ static int run_ard_hp_setup(rfbClient *client) {
 static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   uint16_t region_w;
   uint16_t region_h;
+  const char *media_options_hex = NULL;
+  int adaptive_mode = 0;
 
   if (!client || g_hp.post_rekey_sent) return 1;
+  adaptive_mode = g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
 
   if (g_hp.post_rekey_phase == 0)
     rfbClientLog("ard-hp: sending post-rekey setup phase 1 over CBC transport\n");
@@ -1261,13 +1621,23 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   if (g_hp.post_rekey_phase == 0) {
     if (!rfbClientARDHPSendSetDisplayMessage(client)) return 0;
     if (!SendCurrentPixelFormat(client)) return 0;
+    if (!rfbClientARDHPSendPostAuthEncodings(client)) return 0;
     g_hp.post_rekey_phase = 2;
-    return 1;
+    if (!adaptive_mode) return 1;
   }
   if (g_hp.post_rekey_phase == 1) g_hp.post_rekey_phase = 2;
 
   if (!rfbClientARDHPSendAutoPasteboardCommand(client, 1)) return 0;
-  if (!rfbClientARDHPSendScaleFactor(client, ard_hp_runtime_scale_factor())) return 0;
+  if (!rfbClientARDHPSendScaleFactor(client, ard_hp_runtime_scale_factor(client))) return 0;
+  media_options_hex = getenv("VNC_ARD_HP_MEDIA_STREAM_OPTIONS_HEX");
+  if (adaptive_mode) {
+    if (media_options_hex && *media_options_hex) {
+      if (!rfbClientARDHPSendMediaStreamOptionsHex(client, media_options_hex)) return 0;
+    } else {
+      if (!rfbClientARDHPSendAdaptiveMediaStreamOptions(client)) return 0;
+    }
+  }
+  if (!SendCurrentPixelFormat(client)) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, region_w, region_h, FALSE)) return 0;
   g_hp.initial_full_refresh_done = 0;
   g_hp.initial_full_refresh_retries = 3;
@@ -1279,6 +1649,10 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   rfbClientLog("ard-hp: requested initial full refresh %ux%u and queued %d retries\n",
                (unsigned)region_w, (unsigned)region_h, g_hp.initial_full_refresh_retries);
   if (!rfbClientARDHPSendAutoFramebufferUpdate(client, region_w, region_h)) return 0;
+  if (adaptive_mode) {
+    rfbClientLog("ard-hp: sending adaptive follow-up SetEncodings after media setup\n");
+    if (!rfbClientARDHPSendPostAuthEncodings(client)) return 0;
+  }
   g_hp.auto_fbu_active = 1;
   g_hp.post_rekey_phase = 3;
   g_hp.post_rekey_sent = 1;
@@ -1289,7 +1663,8 @@ static int ard_hp_maybe_advance_post_rekey_setup(rfbClient *client) {
   uint32_t recv_records;
 
   if (!client) return 1;
-  if (g_hp.post_rekey_ready != 2 || g_hp.post_rekey_sent) return 1;
+  if (g_hp.media_stream_active) return 1;
+  if (g_hp.post_rekey_ready != 1 || g_hp.post_rekey_sent) return 1;
   recv_records = rfbClientARDHPReceivedRecordCount(client);
 
   if (g_hp.post_rekey_phase == 0 && recv_records > 1) {
@@ -2981,6 +3356,8 @@ static rfbBool alloc_live_fb(rfbClient *client) {
 
   reset_live_view_pending_present();
   g_live.last_present_us = 0;
+  g_live.last_update_us = 0;
+  g_live.motion_mode_until_us = 0;
   g_live.needs_clear = 1;
   rfbClientLog("live-view ready: framebuffer=%dx%d view=%dx%d\n",
                width, height, view_width, view_height);
@@ -3005,9 +3382,11 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
           }
           queue_live_view_present(0, 0, client->width, client->height);
           present_live_view(client, 0, 0, client->width, client->height);
-          SendFramebufferUpdateRequest(client, 0, 0,
-                                       ard_hp_request_width(client),
-                                       ard_hp_request_height(client), FALSE);
+          if (!g_hp.media_stream_active) {
+            SendFramebufferUpdateRequest(client, 0, 0,
+                                         ard_hp_request_width(client),
+                                         ard_hp_request_height(client), FALSE);
+          }
           break;
         case SDL_WINDOWEVENT_RESIZED:
         case SDL_WINDOWEVENT_SIZE_CHANGED:
@@ -3053,9 +3432,11 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
           } else {
             redraw_live_view(client);
           }
-          SendFramebufferUpdateRequest(client, 0, 0,
-                                       ard_hp_request_width(client),
-                                       ard_hp_request_height(client), FALSE);
+          if (!g_hp.media_stream_active) {
+            SendFramebufferUpdateRequest(client, 0, 0,
+                                         ard_hp_request_width(client),
+                                         ard_hp_request_height(client), FALSE);
+          }
           break;
         }
         case SDL_WINDOWEVENT_FOCUS_LOST:
@@ -3216,7 +3597,7 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
 }
 #endif
 
-static int kHighPerfProbeEncodings[] = {0x44f, 0x450, 0x451, 0x453, 0x455, 0x456, 0x3f2, 0};
+static int kHighPerfProbeEncodings[] = {0x44f, 0x450, 0x451, 0x453, 0x455, 0x456, 0x3ea, 0x3f2, 0x3f3, 0};
 
 static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateRectHeader *rect) {
   g_live.skip_next_fb_update = 1;
@@ -3242,6 +3623,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
 
   if (!client || !rect) return FALSE;
   if ((uint32_t)rect->encoding == 0x44f) {
+    int adaptive_mode = g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
     if (!ReadFromRFBServer(client, (char *)buf, sizeof(buf))) return FALSE;
 
     g_hp.rekey_seen = 1;
@@ -3254,12 +3636,12 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     client->ardSessionKeyReady = TRUE;
     client->suppressNextIncrementalRequest = TRUE;
     if (!rfbClientARDHPEnableTransport(client, next_key, next_iv, counter)) return FALSE;
-    if (!rfbClientARDHPSendInitialDisplayConfiguration(client)) {
-      return FALSE;
-    }
-    if (!rfbClientARDHPSendPostAuthEncodings(client)) return FALSE;
     g_hp.post_rekey_ready = 1;
     g_hp.post_rekey_phase = 0;
+    if (adaptive_mode) {
+      if (!ard_hp_send_post_rekey_setup(client)) return FALSE;
+      g_hp.post_rekey_ready = 0;
+    }
     return TRUE;
   }
 
@@ -3297,7 +3679,17 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     return TRUE;
   }
 
-  if ((uint32_t)rect->encoding != 0x3f2 && (uint32_t)rect->encoding != 0x451 &&
+  if ((uint32_t)rect->encoding == 0x44c) {
+    /*
+     * Pointer/cursor rebase selector. This is a server-side metadata signal in
+     * the post-rekey Apple burst and carries no standalone payload we need to
+     * consume here.
+     */
+    return TRUE;
+  }
+
+  if ((uint32_t)rect->encoding != 0x3ea && (uint32_t)rect->encoding != 0x3f2 &&
+      (uint32_t)rect->encoding != 0x3f3 && (uint32_t)rect->encoding != 0x451 &&
       (uint32_t)rect->encoding != 0x453 && (uint32_t)rect->encoding != 0x455 &&
       (uint32_t)rect->encoding != 0x456)
     return FALSE;
@@ -3311,6 +3703,49 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   if (payload_len != 0 && !ReadFromRFBServer(client, (char *)(payload + sizeof(hdr)), payload_len)) {
     free(payload);
     return FALSE;
+  }
+  if ((uint32_t)rect->encoding == 0x3f2 || (uint32_t)rect->encoding == 0x3f3 ||
+      (uint32_t)rect->encoding == 0x3ea) {
+    ard_hp_dump_media_packet((uint32_t)rect->encoding, payload, total_len);
+    if (client) client->suppressNextIncrementalRequest = TRUE;
+  }
+  if ((uint32_t)rect->encoding == 0x3f2) {
+    ard_hp_dump_media_init_payload(payload, total_len);
+    ard_hp_log_media_init_payload(payload, total_len);
+    g_hp.media_stream_active = 1;
+    g_hp.auto_fbu_active = 0;
+    client->suppressIncrementalRequests = TRUE;
+    g_hp.post_rekey_ready = 0;
+    g_hp.post_rekey_sent = 1;
+    g_hp.initial_full_refresh_retries = 0;
+    g_hp.dynamic_refresh_retries = 0;
+    g_hp.dynamic_refresh_queued_for_request = 0;
+    g_hp.pending_refresh_w = 0;
+    g_hp.pending_refresh_h = 0;
+    g_hp.media_stream_version = total_len >= 4 ? read_be_u16(payload + 2) : 0;
+    g_hp.media_stream_message_type = total_len >= 6 ? read_be_u16(payload + 4) : 0;
+    g_hp.media_stream_base_udp_port = total_len >= 8 ? read_be_u16(payload + 6) : 0;
+    g_hp.media_stream_count = total_len >= 10 ? read_be_u16(payload + 8) : 0;
+    g_hp.media_stream_next_udp_port = total_len >= 12 ? read_be_u16(payload + 10) : 0;
+    rfbClientLog("ard-hp: media-init active version=%u type=%u base_udp=%u stream_count=%u next_udp=%u payload_len=%u\n",
+                 (unsigned)g_hp.media_stream_version,
+                 (unsigned)g_hp.media_stream_message_type,
+                 (unsigned)g_hp.media_stream_base_udp_port,
+                 (unsigned)g_hp.media_stream_count,
+                 (unsigned)g_hp.media_stream_next_udp_port,
+                 (unsigned)payload_len);
+    ard_hp_maybe_probe_media_input(client);
+    free(payload);
+    return TRUE;
+  }
+  if ((uint32_t)rect->encoding == 0x3f3 || (uint32_t)rect->encoding == 0x3ea) {
+    rfbClientLog("ard-hp: media packet encoding=0x%08x (%s) payload_len=%u total_len=%lu\n",
+                 (unsigned)rect->encoding,
+                 ard_hp_probe_encoding_name((uint32_t)rect->encoding),
+                 (unsigned)payload_len,
+                 (unsigned long)total_len);
+    free(payload);
+    return TRUE;
   }
   if ((uint32_t)rect->encoding == 0x451 && total_len >= 12) {
     int first_display_layout = !g_hp.displayinfo2_seen;
@@ -3615,6 +4050,7 @@ static void on_fb_update(rfbClient *client, int x, int y, int w, int h) {
 
 static void on_fb_update_done(rfbClient *client) {
   long long now_ms = monotonic_ms();
+  long long now_us = monotonic_us();
   uint16_t repaint_w = 0;
   uint16_t repaint_h = 0;
   g_frame.frames++;
@@ -3643,6 +4079,7 @@ static void on_fb_update_done(rfbClient *client) {
   }
 
 #if defined(ARDHPDEBUG_HAS_SDL)
+  if (g_runtime.live_view) note_live_view_update_activity(client, now_us, g_frame.frame_pixels);
   if (g_runtime.live_view && g_live.awaiting_refresh_present && client &&
       g_frame.frame_pixels > 0) {
     g_live.awaiting_refresh_present = 0;
@@ -3665,12 +4102,20 @@ static void on_fb_update_done(rfbClient *client) {
 
 static int ard_hp_maybe_retry_initial_full_refresh(rfbClient *client) {
   if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (g_hp.media_stream_active) return 1;
   if (g_hp.initial_full_refresh_done || g_hp.initial_full_refresh_retries <= 0) return 1;
   if (client->width <= 0 || client->height <= 0) return 1;
 
+  if (!SendCurrentPixelFormat(client)) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0,
                                     ard_hp_request_width(client),
                                     ard_hp_request_height(client), FALSE)) return 0;
+  if (g_hp.auto_fbu_active &&
+      !rfbClientARDHPSendAutoFramebufferUpdate(client,
+                                               ard_hp_request_width(client),
+                                               ard_hp_request_height(client))) {
+    return 0;
+  }
   if (ard_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
   g_hp.initial_full_refresh_retries--;
   rfbClientLog("ard-hp: retrying initial full refresh %ux%u remaining=%d\n",
@@ -3683,9 +4128,11 @@ static int ard_hp_maybe_retry_initial_full_refresh(rfbClient *client) {
 static int ard_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
                                              const char *reason) {
   if (!g_runtime.ard_hp_mode || !client) return 1;
+  if (g_hp.media_stream_active) return 1;
   if (w == 0 || h == 0) return 1;
-  if (g_hp.auto_fbu_active && !rfbClientARDHPSendAutoFramebufferUpdate(client, w, h)) return 0;
+  if (!SendCurrentPixelFormat(client)) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, w, h, FALSE)) return 0;
+  if (g_hp.auto_fbu_active && !rfbClientARDHPSendAutoFramebufferUpdate(client, w, h)) return 0;
   if (ard_hp_should_suppress_incremental()) client->suppressNextIncrementalRequest = TRUE;
   rfbClientLog("ard-hp: requested full refresh %ux%u (%s)\n",
                (unsigned)w, (unsigned)h, reason ? reason : "unspecified");
@@ -3892,6 +4339,7 @@ wait_for_server:
     if (n == 0 && !ard_hp_maybe_request_pending_region_refresh(client)) break;
     if (n == 0 && !ard_hp_maybe_retry_dynamic_full_refresh(client)) break;
     if (n == 0 && !ard_hp_maybe_retry_initial_full_refresh(client)) break;
+    if (n == 0 && !ard_hp_maybe_pump_media_input(client)) break;
 #if defined(ARDHPDEBUG_HAS_SDL)
     if (g_runtime.live_view && !maybe_present_live_view_if_due(client, FALSE)) break;
 #endif

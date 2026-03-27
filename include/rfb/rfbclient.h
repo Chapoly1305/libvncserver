@@ -503,6 +503,7 @@ typedef struct _rfbClient {
 
 	rfbBool requestedResize;
 	rfbBool suppressNextIncrementalRequest;
+	rfbBool suppressIncrementalRequests;
         /**
          * Used for intended dimensions, rfbClient.width and rfbClient.height are used to manage the real framebuffer dimensions.
 	 */
@@ -536,6 +537,7 @@ typedef struct _rfbClient {
 	uint64_t perf_last_rect_pixels;
 	int32_t perf_last_rect_encoding;
 	uint64_t perf_last_rect_us;
+	uint64_t perf_last_rect_delta_us;
 	uint64_t perf_last_present_us;
 	uint64_t perf_last_rect_to_present_us;
 } rfbClient;
@@ -587,6 +589,8 @@ extern void rfbClientARDHPSetPostRekeyPixelFormat(rfbClient *client);
 extern rfbBool rfbClientARDHPSendSetDisplayMessage(rfbClient *client);
 extern rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client);
 extern rfbBool rfbClientARDHPSendAutoPasteboardCommand(rfbClient *client, uint16_t selector);
+extern rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client);
+extern rfbBool rfbClientARDHPSendMediaStreamOptionsHex(rfbClient *client, const char *hex);
 extern rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale);
 extern rfbBool rfbClientARDHPSendAutoFramebufferUpdate(rfbClient *client,
                                                          uint16_t width, uint16_t height);
