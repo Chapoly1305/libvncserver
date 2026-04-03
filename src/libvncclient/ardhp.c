@@ -1280,7 +1280,11 @@ rfbBool rfbClientRunARDHPPrelude(rfbClient *client) {
     struct ard_hp_set_encryption_message msg = ard_hp_make_native_prelude_set_encryption();
     if (!send_blob(client, &msg, sizeof(msg), "ard-hp SetEncryptionMessage")) return FALSE;
   }
-  {
+  if (adaptive_mode) {
+    struct ard_hp_set_mode_message msg = ard_hp_make_set_mode_message(0);
+    if (!send_blob(client, &msg, sizeof(msg), "ard-hp SetModeMessage")) return FALSE;
+    rfbClientLog("ard-hp: adaptive mode uses SetModeMessage mode=0\n");
+  } else {
     struct ard_hp_set_mode_message msg = ard_hp_make_native_prelude_set_mode();
     if (!send_blob(client, &msg, sizeof(msg), "ard-hp SetModeMessage")) return FALSE;
   }
@@ -1417,6 +1421,8 @@ rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client) {
   int add_promode = ard_hp_env_flag_enabled("VNC_ARD_HP_ADD_PROMODE_ENCODING");
   int prefer_promode = ard_hp_env_flag_enabled("VNC_ARD_HP_PREFER_PROMODE_ENCODING");
   int adaptive_mode = ard_hp_env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
+  int adaptive_advertise_media_encodings =
+      !ard_hp_env_flag_enabled("VNC_ARD_HP_ADAPTIVE_DISABLE_MEDIA_ENCODINGS");
   int omit_44c = ard_hp_env_flag_enabled("VNC_ARD_HP_OMIT_44C");
   int omit_44d = ard_hp_env_flag_enabled("VNC_ARD_HP_OMIT_44D");
   int disable_zlib = ard_hp_env_flag_enabled("VNC_DISABLE_ZLIB");
@@ -1424,10 +1430,16 @@ rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client) {
 
   if (!client) return FALSE;
   if (adaptive_mode) {
-    add_promode = 1;
-    prefer_promode = 1;
-    rfbClientLog("ard-hp: adaptive/media branch also uses client message 0x1c MediaStreamOptions; "
-                 "advertising the native 0x3f2/0x3f3/0x3ea media family\n");
+    if (adaptive_advertise_media_encodings) {
+      add_promode = 1;
+      prefer_promode = 1;
+      rfbClientLog("ard-hp: adaptive/media branch also uses client message 0x1c MediaStreamOptions; "
+                   "advertising the native 0x3f2/0x3f3/0x3ea media family\n");
+    } else {
+      rfbClientLog("ard-hp: adaptive/media branch uses client message 0x1c MediaStreamOptions; "
+                   "keeping SetEncodings on native non-media family (set "
+                   "VNC_ARD_HP_ADAPTIVE_DISABLE_MEDIA_ENCODINGS=1 to disable 0x3f2/0x3f3/0x3ea)\n");
+    }
   }
   if (add_promode && prefer_promode) {
     if (adaptive_mode) {

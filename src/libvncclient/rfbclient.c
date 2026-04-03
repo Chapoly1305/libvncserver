@@ -2266,6 +2266,7 @@ HandleRFBServerMessage(rfbClient* client)
     rfbFramebufferUpdateRectHeader rect;
     int linesToRead;
     int bytesPerLine;
+    rfbBool sawFramebufferRect = FALSE;
     int i;
 
     if (!ReadFromRFBServer(client, ((char *)&msg.fu) + 1,
@@ -2754,20 +2755,26 @@ HandleRFBServerMessage(rfbClient* client)
       /* Now we may discard "soft cursor locks". */
       client->SoftCursorUnlockScreen(client);
 
-      rfbClientRecordRectStats(client, rect.encoding, rect.r.w, rect.r.h);
-      client->GotFrameBufferUpdate(client, rect.r.x, rect.r.y, rect.r.w, rect.r.h);
+      if (!client->suppressCurrentFramebufferUpdateCallbacks) {
+        rfbClientRecordRectStats(client, rect.encoding, rect.r.w, rect.r.h);
+        client->GotFrameBufferUpdate(client, rect.r.x, rect.r.y, rect.r.w, rect.r.h);
+        sawFramebufferRect = TRUE;
+      }
+      client->suppressCurrentFramebufferUpdateCallbacks = FALSE;
     }
 
-    if (client->suppressIncrementalRequests) {
-      client->suppressNextIncrementalRequest = FALSE;
-    } else if (client->suppressNextIncrementalRequest) {
-      client->suppressNextIncrementalRequest = FALSE;
-    } else if (!SendIncrementalFramebufferUpdateRequest(client)) {
-      return FALSE;
-    }
+    if (sawFramebufferRect) {
+      if (client->suppressIncrementalRequests) {
+        client->suppressNextIncrementalRequest = FALSE;
+      } else if (client->suppressNextIncrementalRequest) {
+        client->suppressNextIncrementalRequest = FALSE;
+      } else if (!SendIncrementalFramebufferUpdateRequest(client)) {
+        return FALSE;
+      }
 
-    if (client->FinishedFrameBufferUpdate)
-      client->FinishedFrameBufferUpdate(client);
+      if (client->FinishedFrameBufferUpdate)
+        client->FinishedFrameBufferUpdate(client);
+    }
 
     break;
   }

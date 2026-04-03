@@ -32,6 +32,24 @@ enum ard_hp_client_message_type {
   ARD_HP_MSG_VIEWER_INFO = 0x21,
 };
 
+enum ard_hp_media_stream_options_constants {
+  /*
+   * Native 0x1c header is 36 bytes total:
+   * fixed fields through +0x0f plus 16-byte media/session id at +0x14.
+   * First stream key begins at +0x24.
+   */
+  ARD_HP_MEDIA_STREAM_OPTIONS_HEADER_LEN = 36,
+  ARD_HP_MEDIA_STREAM_OPTIONS_SESSION_ID_LEN = 16,
+  ARD_HP_MEDIA_STREAM_OPTIONS_KEY_LEN = 46,
+};
+
+enum ard_hp_media_stream_options_flags {
+  ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_STREAM1_SUPPORTS_60FPS = 1u << 0,
+  ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_STREAM2_SUPPORTS_60FPS = 1u << 1,
+  ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_DO_NOT_SEND_CURSOR = 1u << 2,
+  ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_APPLE_REMOTE_DESKTOP_VIEWER = 1u << 3,
+};
+
 enum ard_hp_encoding_type {
   /* Apple-private FramebufferUpdate rectangle encodings observed on the wire. */
   ARD_HP_ENCODING_POINTER_REBASE = 0x44c,
@@ -175,6 +193,18 @@ struct ard_hp_auto_pasteboard_message {
   uint8_t reserved[2];
   uint8_t selector;
   uint8_t reserved_tail[4];
+};
+
+struct ard_hp_media_stream_options_header {
+  uint8_t type;
+  uint8_t reserved;
+  uint8_t message_size_be[2];
+  uint8_t version_be[2];
+  uint8_t flags_be[4];
+  uint8_t audio_offer_len_be[2];
+  uint8_t video1_offer_len_be[2];
+  uint8_t video2_offer_len_be[2];
+  uint8_t media_session_id[ARD_HP_MEDIA_STREAM_OPTIONS_SESSION_ID_LEN];
 };
 
 struct ard_hp_display_configuration_header {

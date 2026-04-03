@@ -504,6 +504,7 @@ typedef struct _rfbClient {
 	rfbBool requestedResize;
 	rfbBool suppressNextIncrementalRequest;
 	rfbBool suppressIncrementalRequests;
+	rfbBool suppressCurrentFramebufferUpdateCallbacks;
         /**
          * Used for intended dimensions, rfbClient.width and rfbClient.height are used to manage the real framebuffer dimensions.
 	 */
@@ -561,6 +562,7 @@ extern int listenForIncomingConnectionsNoFork(rfbClient* viewer, int usec_timeou
 extern rfbBool rfbEnableClientLogging;
 typedef void (*rfbClientLogProc)(const char *format, ...);
 extern rfbClientLogProc rfbClientLog,rfbClientErr;
+typedef struct rfbARDHPSRTPContext rfbARDHPSRTPContext;
 extern rfbBool ConnectToRFBServer(rfbClient* client,const char *hostname, int port);
 extern rfbBool ConnectToRFBRepeater(rfbClient* client,const char *repeaterHost, int repeaterPort, const char *destHost, int destPort);
 extern void SetClientAuthSchemes(rfbClient* client,const uint32_t *authSchemes, int size);
@@ -591,6 +593,21 @@ extern rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client);
 extern rfbBool rfbClientARDHPSendAutoPasteboardCommand(rfbClient *client, uint16_t selector);
 extern rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client);
 extern rfbBool rfbClientARDHPSendMediaStreamOptionsHex(rfbClient *client, const char *hex);
+extern rfbBool rfbClientARDHPExtractVideoBytestream(uint32_t encoding,
+                                                     const uint8_t *packet,
+                                                     size_t packet_len,
+                                                     uint8_t **out_data,
+                                                     size_t *out_len,
+                                                     rfbBool *out_from_length_prefix);
+extern rfbARDHPSRTPContext *rfbClientARDHPSRTPCreateInboundSuite5(const uint8_t *key_material,
+                                                                   size_t key_len,
+                                                                   rfbBool short_auth_tag);
+extern void rfbClientARDHPSRTPDestroy(rfbARDHPSRTPContext *ctx);
+extern rfbBool rfbClientARDHPSRTPUnprotectPacket(rfbARDHPSRTPContext *ctx,
+                                                 const uint8_t *packet,
+                                                 size_t packet_len,
+                                                 uint8_t **out_packet,
+                                                 size_t *out_len);
 extern rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale);
 extern rfbBool rfbClientARDHPSendAutoFramebufferUpdate(rfbClient *client,
                                                          uint16_t width, uint16_t height);

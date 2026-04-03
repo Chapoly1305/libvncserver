@@ -69,6 +69,7 @@ option(WITH_OPENSSL "Search for the OpenSSL cryptography library to support TLS 
 option(WITH_SYSTEMD "Search for libsystemd to build with systemd socket activation support" ON)
 option(WITH_GCRYPT "Search for Libgcrypt to use as crypto backend" ON)
 option(WITH_FFMPEG "Search for FFMPEG to build an example VNC to MPEG encoder" ON)
+option(WITH_SRTP2 "Search for libsrtp2 to enable ARD adaptive SRTP helpers" ON)
 option(WITH_TIGHTVNC_FILETRANSFER "Enable filetransfer if there is pthreads support" ON)
 option(WITH_24BPP "Allow 24 bpp" ON)
 option(WITH_IPv6 "Enable IPv6 Support" ON)
@@ -162,6 +163,22 @@ endif(WITH_GCRYPT)
 if(WITH_FFMPEG)
   find_package(FFMPEG 3.1.0 COMPONENTS avformat avcodec avutil swscale)
 endif(WITH_FFMPEG)
+
+if(WITH_SRTP2)
+  find_path(SRTP2_INCLUDE_DIR NAMES srtp3/srtp.h srtp2/srtp.h srtp/srtp.h)
+  find_library(SRTP2_LIBRARY NAMES srtp3 srtp2 srtp)
+  if(SRTP2_INCLUDE_DIR AND SRTP2_LIBRARY)
+    message(STATUS "Building with libsrtp2: ${SRTP2_LIBRARY} and ${SRTP2_INCLUDE_DIR}")
+    include_directories(${SRTP2_INCLUDE_DIR})
+    add_definitions(-DLIBVNCSERVER_HAVE_SRTP2)
+    if(EXISTS "${SRTP2_INCLUDE_DIR}/srtp3/srtp.h")
+      add_definitions(-DLIBVNCSERVER_HAVE_SRTP3_API)
+    endif()
+    set(SRTP2_LIBRARIES ${SRTP2_LIBRARY})
+  else()
+    message(STATUS "libsrtp2 not found; ARD adaptive SRTP helpers disabled")
+  endif()
+endif(WITH_SRTP2)
 
 
 check_include_file("dirent.h"      LIBVNCSERVER_HAVE_DIRENT_H)
@@ -393,6 +410,7 @@ if(APPLE)
   set(LIBVNCCLIENT_SOURCES
     ${LIBVNCCLIENT_SOURCES}
     ${LIBVNCCLIENT_DIR}/ardhp.c
+    ${LIBVNCCLIENT_DIR}/ardhp_media.c
   )
 endif()
 
@@ -526,6 +544,7 @@ if(WITH_LIBVNCCLIENT)
                         ${CRYPTO_LIBRARIES}
                         ${GNUTLS_LIBRARIES}
                         ${OPENSSL_LIBRARIES}
+                        ${SRTP2_LIBRARIES}
   )
   if(APPLE)
     target_link_libraries(vncclient "-framework CoreFoundation" "-framework GSS" "-framework Kerberos")
@@ -691,6 +710,9 @@ if(WITH_EXAMPLES)
       set_target_properties(client_examples_${e} PROPERTIES OUTPUT_NAME ${e})
       set_target_properties(client_examples_${e} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/examples/client)
       target_link_libraries(client_examples_${e} vncclient ${CMAKE_THREAD_LIBS_INIT} ${SDL2_LIBRARY} ${GTK2_LIBRARIES} ${FFMPEG_LIBRARIES} ${LIBSSHTUNNEL_LIBRARY})
+      if(FFMPEG_FOUND AND e STREQUAL "ardhpdebug")
+        target_compile_definitions(client_examples_${e} PRIVATE ARDHPDEBUG_HAS_FFMPEG=1)
+      endif()
       if(APPLE AND e STREQUAL "ardhpdebug")
         target_link_libraries(client_examples_${e} "-framework Security" "-framework CoreFoundation" "-framework GSS" "-framework Kerberos")
         target_compile_definitions(client_examples_${e} PRIVATE "$<$<CONFIG:Release>:ARDHPDEBUG_MINIMAL_RELEASE=1>")
