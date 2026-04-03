@@ -714,7 +714,15 @@ if(WITH_EXAMPLES)
         target_compile_definitions(client_examples_${e} PRIVATE ARDHPDEBUG_HAS_FFMPEG=1)
       endif()
       if(APPLE AND e STREQUAL "ardhpdebug")
-        target_link_libraries(client_examples_${e} "-framework Security" "-framework CoreFoundation" "-framework GSS" "-framework Kerberos")
+        target_link_libraries(client_examples_${e}
+          "-framework Security"
+          "-framework CoreFoundation"
+          "-framework GSS"
+          "-framework Kerberos"
+          "-framework CoreMedia"
+          "-framework CoreVideo"
+          "-framework VideoToolbox")
+        target_compile_definitions(client_examples_${e} PRIVATE ARDHPDEBUG_HAS_VIDEOTOOLBOX=1)
         target_compile_definitions(client_examples_${e} PRIVATE "$<$<CONFIG:Release>:ARDHPDEBUG_MINIMAL_RELEASE=1>")
         enable_debug_sanitizers(client_examples_${e})
       endif()

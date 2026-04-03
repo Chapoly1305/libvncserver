@@ -1580,6 +1580,35 @@ rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client) {
   return ok;
 }
 
+rfbBool rfbClientARDHPBuildAdaptiveMediaStreamOptionsHex(char **out_hex) {
+  uint8_t *buf = NULL;
+  size_t len = 0;
+  char *hex = NULL;
+
+  if (out_hex) *out_hex = NULL;
+  if (!out_hex) return FALSE;
+
+  buf = ard_hp_build_adaptive_media_stream_options(&len);
+  if (!buf || len == 0) {
+    free(buf);
+    return FALSE;
+  }
+
+  if (len > ((SIZE_MAX - 1u) / 2u)) {
+    free(buf);
+    return FALSE;
+  }
+  hex = (char *)malloc((len * 2u) + 1u);
+  if (!hex) {
+    free(buf);
+    return FALSE;
+  }
+  ard_hp_hex_encode(buf, len, hex, (len * 2u) + 1u);
+  free(buf);
+  *out_hex = hex;
+  return TRUE;
+}
+
 rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale) {
   struct ard_hp_scale_factor_message msg = ard_hp_make_scale_factor_message(scale);
   rfbClientLog("ard-hp: using scale factor %.6f\n", scale);

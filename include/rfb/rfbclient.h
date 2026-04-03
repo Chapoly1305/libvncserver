@@ -593,6 +593,7 @@ extern rfbBool rfbClientARDHPSendPostAuthEncodings(rfbClient *client);
 extern rfbBool rfbClientARDHPSendAutoPasteboardCommand(rfbClient *client, uint16_t selector);
 extern rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client);
 extern rfbBool rfbClientARDHPSendMediaStreamOptionsHex(rfbClient *client, const char *hex);
+extern rfbBool rfbClientARDHPBuildAdaptiveMediaStreamOptionsHex(char **out_hex);
 extern rfbBool rfbClientARDHPExtractVideoBytestream(uint32_t encoding,
                                                      const uint8_t *packet,
                                                      size_t packet_len,
