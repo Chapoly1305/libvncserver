@@ -41,26 +41,25 @@ static const int32_t kARDHPAdaptiveEncodings[] = {
     ARD_HP_ENCODING_MEDIA_STREAM_MESSAGE3,
 };
 static const uint8_t kARDHPMediaOptionsPrefix1[] = {
-    0x93, 0x59, 0x6a, 0x86, 0x45, 0x47, 0x4f, 0x65, 0x88, 0xe7, 0x8e, 0x48,
-    0xec, 0x5c, 0xa8, 0xe6, 0x2b, 0x18, 0x8c, 0x66, 0x63, 0x69, 0xe6, 0x77,
-    0x63, 0xf3, 0xfe, 0x67, 0xdd, 0x89, 0xe0, 0x49, 0x3a, 0x50, 0xd8, 0x7a,
-    0x65, 0x27, 0x19, 0xaa, 0x48, 0x60, 0x81, 0xcd, 0x8e, 0x96, 0x22, 0x6a,
-    0xf4, 0x8c, 0xc4, 0x05, 0x34, 0xce, 0xbc, 0x5c, 0xcc, 0x0d, 0xcd, 0x3d,
-    0x03, 0x95, 0x39, 0xdb, 0xbc, 0x15, 0x44, 0x70, 0xf3, 0x8f, 0xb4, 0x42,
-    0x10, 0xb2, 0x59, 0x83, 0xb0, 0xcf, 0xfa, 0x71, 0xb5, 0xed, 0x8e, 0x1e,
-    0xf2, 0xc6, 0xbd, 0xbf, 0x14, 0xf7, 0x10, 0x1a, 0x20, 0x7e, 0xaa, 0x89,
-    0x06, 0x29, 0x4e, 0x2c, 0x09, 0xc4, 0xcd, 0xb1, 0xa2, 0x8b, 0x02, 0x2b,
+    0x96, 0x38, 0xd2, 0xa0, 0xfa, 0x7e, 0x7f, 0x95, 0x04, 0x7e, 0x08, 0x58,
+    0x67, 0xd8, 0xfe, 0x05, 0x8b, 0x57, 0x85, 0xf5, 0xb8, 0xa7, 0xce, 0x63,
+    0xb8, 0x91, 0xc5, 0x02, 0x60, 0x03, 0xc8, 0xbc, 0xd6, 0x90, 0x53, 0x6a,
+    0xb5, 0x3a, 0x76, 0x8f, 0x8c, 0x0c, 0xa7, 0xe7, 0x4d, 0x54, 0x61, 0x20,
+    0x18, 0x30, 0xdf, 0x2c, 0x61, 0xd9, 0x56, 0x1b, 0xd7, 0xea, 0x6f, 0x67,
+    0x48, 0xe3, 0x74, 0x48, 0x63, 0xf9, 0x7a, 0x99, 0x5b, 0x2f, 0xda, 0x74,
+    0xa7, 0x6d, 0x98, 0xde, 0xb4, 0x45, 0x9f, 0xaf, 0x72, 0xd7, 0x81, 0xed,
+    0x52, 0x02, 0xf5, 0x8b, 0xe6, 0x24, 0x21, 0x8c,
 };
 static const size_t kARDHPMediaOptionsPrefix1Len = sizeof(kARDHPMediaOptionsPrefix1);
 static const uint8_t kARDHPMediaOptionsMid[] = {
-    0x24, 0x4a, 0x14, 0x40, 0xd1, 0x5e, 0x68, 0x45, 0x56, 0x0e, 0xa1, 0x55,
-    0x25, 0xd1, 0xb9, 0x54, 0xcb, 0x9f, 0x49, 0x40, 0x5d, 0xa7, 0xb5, 0xa7,
-    0x28, 0x41, 0x82, 0x79, 0x6e, 0x69, 0x7f, 0x1f, 0x4a, 0x7f, 0xe5, 0x9f,
-    0xc8, 0x0b, 0x22, 0xfc, 0xaf, 0x0b, 0x05, 0x30, 0xc9, 0xbd, 0x58, 0x4f,
-    0x98, 0x67, 0x6f, 0x79, 0x5f, 0x37, 0xf9, 0xe6, 0x4f, 0x94, 0x82, 0xfe,
-    0x0a, 0x8f, 0x03, 0x5d, 0x78, 0x0b, 0x83, 0x8e, 0xe7, 0xf9, 0x2f, 0x91,
-    0xdf, 0xc3, 0x0e, 0x0a, 0x91, 0x04, 0x4e, 0x79, 0xe9, 0x91, 0x50, 0x7c,
-    0x20, 0x3e, 0xac, 0x44, 0x08, 0xd7, 0x28, 0x91,
+    0x8e, 0x0a, 0x6c, 0x30, 0xb9, 0x8d, 0x12, 0xbf, 0x5c, 0x50, 0x79, 0x79,
+    0x73, 0x66, 0xa5, 0x0d, 0xbd, 0xd9, 0x58, 0xcc, 0x92, 0x56, 0xef, 0x2c,
+    0x7e, 0xdc, 0x59, 0xbd, 0x59, 0x69, 0x6a, 0x09, 0x6c, 0xa7, 0x91, 0x23,
+    0xc7, 0xe8, 0x08, 0xe9, 0x42, 0x4b, 0xc1, 0xc8, 0x81, 0xf7, 0x17, 0xd5,
+    0xa1, 0x56, 0x26, 0xe2, 0x25, 0x30, 0xf1, 0x42, 0xad, 0xde, 0x84, 0xa4,
+    0xed, 0x36, 0x98, 0x59, 0x64, 0xeb, 0x08, 0x5c, 0xa0, 0x13, 0x49, 0xb3,
+    0x68, 0x18, 0x5a, 0x84, 0xcf, 0xa6, 0x4f, 0x8b, 0xd0, 0xd3, 0xe8, 0xd4,
+    0x02, 0xe9, 0xc7, 0x86, 0xb2, 0xcd, 0x0e, 0xe2,
 };
 static const size_t kARDHPMediaOptionsMidLen = sizeof(kARDHPMediaOptionsMid);
 static const uint8_t kARDHPMediaBlobMode8Raw[] = {
@@ -101,12 +100,43 @@ static const uint8_t kARDHPMediaBlobMode7Raw[] = {
     0xca, 0xb8, 0xed, 0x01, 0x70, 0x02, 0x80, 0x01, 0x00, 0x90, 0x01, 0x01,
 };
 static const size_t kARDHPMediaBlobMode7RawLen = sizeof(kARDHPMediaBlobMode7Raw);
+static const uint8_t kARDHPMediaBlobMode8ZlibGT[] = {
+    0x78, 0xda, 0xe3, 0x60, 0x14, 0x60, 0x94, 0x12, 0xe0, 0x78, 0x3f, 0xab, 0xdf, 0x57, 0x80, 0x41,
+    0x82, 0x41, 0xe1, 0xbf, 0x8d, 0x06, 0x83, 0x01, 0x83, 0x11, 0x6f, 0x58, 0x66, 0x72, 0x6a, 0x51,
+    0x7e, 0xa5, 0x82, 0xa1, 0x9e, 0xb9, 0x9e, 0x81, 0x03, 0x83, 0x17, 0x27, 0xc7, 0x2b, 0x79, 0xa0,
+    0x82, 0x86, 0x06, 0x46, 0x2f, 0x56, 0x0e, 0x16, 0x81, 0x27, 0x46, 0x5e, 0x5c, 0x1c, 0x0c, 0x02,
+    0x0d, 0x5b, 0x3a, 0x85, 0x25, 0x1a, 0x12, 0x80, 0x42, 0x8c, 0x02, 0xab, 0x99, 0xbc, 0xb8, 0x41,
+    0x42, 0x7d, 0xe7, 0x64, 0x80, 0xca, 0x04, 0x20, 0x9c, 0xd9, 0xef, 0x98, 0x80, 0x1c, 0x0e, 0x08,
+    0xe7, 0xd6, 0x11, 0x4e, 0x20, 0x87, 0x0d, 0xa8, 0x5a, 0x40, 0xa0, 0x45, 0x21, 0xa3, 0x61, 0xc1,
+    0xc7, 0xad, 0xb3, 0x9f, 0x9d, 0xda, 0xf1, 0x96, 0xb1, 0x80, 0xa9, 0x81, 0x91, 0x61, 0x02, 0x23,
+    0x23, 0x00, 0x6a, 0x36, 0x25, 0xee,
+};
+static const size_t kARDHPMediaBlobMode8ZlibGTLen = sizeof(kARDHPMediaBlobMode8ZlibGT);
+static const uint8_t kARDHPMediaBlobMode7ZlibGT[] = {
+    0x78, 0xda, 0xe3, 0x60, 0x14, 0x60, 0xd4, 0x7a, 0xcf, 0xc8, 0x71, 0xfd, 0x7a, 0xcb, 0x1c, 0x46,
+    0x01, 0x06, 0xa9, 0x5a, 0x8e, 0x6a, 0x21, 0x2e, 0x0e, 0xa0, 0xa0, 0xc4, 0xe1, 0x76, 0x66, 0x05,
+    0x06, 0x30, 0x9b, 0x09, 0x89, 0x8d, 0x45, 0x5c, 0xca, 0xdd, 0xcd, 0x27, 0xd8, 0xda, 0x37, 0xd8,
+    0x4a, 0xd7, 0xd0, 0xda, 0xc7, 0x0d, 0x4c, 0x86, 0x04, 0x59, 0x3b, 0x3b, 0x3a, 0x39, 0x3a, 0x5b,
+    0x07, 0xf8, 0x07, 0x5b, 0x19, 0x58, 0xbb, 0xfa, 0xbb, 0x58, 0x19, 0x5a, 0x7b, 0x84, 0x04, 0x5b,
+    0x19, 0x59, 0x07, 0x05, 0x59, 0x19, 0x5b, 0x3b, 0x06, 0x59, 0x59, 0xe8, 0x9b, 0xea, 0x98, 0xea,
+    0x5b, 0x58, 0x47, 0x20, 0x98, 0x0a, 0x8c, 0x52, 0x31, 0x1c, 0x29, 0x38, 0xad, 0xb1, 0x03, 0x59,
+    0x03, 0xb1, 0x00, 0x64, 0xac, 0x29, 0xa6, 0xb1, 0x40, 0x61, 0x57, 0x2b, 0x13, 0x5c, 0xa6, 0xf3,
+    0x19, 0xb0, 0x58, 0x30, 0x3a, 0xd8, 0x7b, 0x30, 0x26, 0x30, 0x1a, 0xf1, 0x86, 0x65, 0x26, 0xa7,
+    0x16, 0xe5, 0x57, 0x2a, 0x18, 0xea, 0x99, 0xeb, 0x19, 0x38, 0x30, 0x78, 0x71, 0x73, 0x30, 0x08,
+    0x34, 0xdc, 0x3a, 0xc2, 0x29, 0xd1, 0xd0, 0xc0, 0xe6, 0xc5, 0x05, 0xe2, 0x6c, 0xe9, 0x14, 0x96,
+    0x68, 0x48, 0xf0, 0xe2, 0xe4, 0x78, 0x25, 0x2f, 0xc0, 0x00, 0x14, 0x66, 0xf4, 0x62, 0x05, 0x3a,
+    0x66, 0x35, 0x13, 0x44, 0xe9, 0xec, 0x77, 0x4c, 0x40, 0x31, 0x0e, 0x08, 0xa7, 0xef, 0x9c, 0x0c,
+    0x90, 0x23, 0x00, 0x54, 0x20, 0x20, 0xd0, 0xa2, 0x00, 0xa4, 0x58, 0x04, 0x9e, 0x18, 0x65, 0x34,
+    0x7c, 0x78, 0xb1, 0x7d, 0xf6, 0xb3, 0x53, 0x3b, 0xde, 0x32, 0x16, 0x30, 0x35, 0x30, 0x32, 0x4c,
+    0x60, 0x64, 0x04, 0x00, 0x3e, 0x9b, 0x55, 0xa5,
+};
+static const size_t kARDHPMediaBlobMode7ZlibGTLen = sizeof(kARDHPMediaBlobMode7ZlibGT);
 static const uint16_t kARDHPMediaOptionsVersion = 3;
 enum {
-  kARDHPMediaOptionsFlagStream1Supports60FPS = 1u << 0,
-  kARDHPMediaOptionsFlagStream2Supports60FPS = 1u << 1,
-  kARDHPMediaOptionsFlagDoNotSendCursor = 1u << 2,
-  kARDHPMediaOptionsFlagAppleRemoteDesktopViewer = 1u << 3,
+  kARDHPMediaOptionsFlagStream1Supports60FPS = ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_STREAM1_SUPPORTS_60FPS,
+  kARDHPMediaOptionsFlagStream2Supports60FPS = ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_STREAM2_SUPPORTS_60FPS,
+  kARDHPMediaOptionsFlagDoNotSendCursor = ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_DO_NOT_SEND_CURSOR,
+  kARDHPMediaOptionsFlagAppleRemoteDesktopViewer = ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_APPLE_REMOTE_DESKTOP_VIEWER,
 };
 static const uint32_t kARDHPMediaOptionsFlags =
     kARDHPMediaOptionsFlagStream1Supports60FPS |
@@ -438,8 +468,10 @@ cleanup:
 
 static uint8_t *ard_hp_build_adaptive_media_stream_options(size_t *out_len) {
   uint8_t *endpoint_info = NULL;
-  uint8_t *blob_mode8 = NULL;
-  uint8_t *blob_mode7 = NULL;
+  uint8_t *blob_mode8_owned = NULL;
+  uint8_t *blob_mode7_owned = NULL;
+  const uint8_t *blob_mode8 = NULL;
+  const uint8_t *blob_mode7 = NULL;
   uint8_t *plist_mode8 = NULL;
   uint8_t *plist_mode7 = NULL;
   uint8_t *msg = NULL;
@@ -455,15 +487,39 @@ static uint8_t *ard_hp_build_adaptive_media_stream_options(size_t *out_len) {
   uint16_t audio_offer_len = 0;
   uint16_t video1_offer_len = 0;
   uint16_t video2_offer_len = 0;
+  int runtime_blob_compress = 0;
+  uint8_t prefix1_dynamic[sizeof(kARDHPMediaOptionsPrefix1)];
+  uint8_t mid_dynamic[sizeof(kARDHPMediaOptionsMid)];
+  const uint8_t *prefix1_data = kARDHPMediaOptionsPrefix1;
+  const uint8_t *mid_data = kARDHPMediaOptionsMid;
 
   if (out_len) *out_len = 0;
   endpoint_info = ard_hp_build_endpoint_info(&endpoint_info_len);
   if (!endpoint_info) goto cleanup;
   if (!ard_hp_uuid_upper(call_id_mode8) || !ard_hp_uuid_upper(call_id_mode7)) goto cleanup;
-  if (!ard_hp_compress_blob(kARDHPMediaBlobMode8Raw, kARDHPMediaBlobMode8RawLen, &blob_mode8, &blob_mode8_len))
-    goto cleanup;
-  if (!ard_hp_compress_blob(kARDHPMediaBlobMode7Raw, kARDHPMediaBlobMode7RawLen, &blob_mode7, &blob_mode7_len))
-    goto cleanup;
+  runtime_blob_compress = ard_hp_env_flag_enabled("VNC_ARD_HP_MEDIA_USE_RUNTIME_ZLIB");
+  if (runtime_blob_compress) {
+    if (!ard_hp_compress_blob(kARDHPMediaBlobMode8Raw, kARDHPMediaBlobMode8RawLen,
+                              &blob_mode8_owned, &blob_mode8_len))
+      goto cleanup;
+    if (!ard_hp_compress_blob(kARDHPMediaBlobMode7Raw, kARDHPMediaBlobMode7RawLen,
+                              &blob_mode7_owned, &blob_mode7_len))
+      goto cleanup;
+    blob_mode8 = blob_mode8_owned;
+    blob_mode7 = blob_mode7_owned;
+  } else {
+    blob_mode8 = kARDHPMediaBlobMode8ZlibGT;
+    blob_mode8_len = kARDHPMediaBlobMode8ZlibGTLen;
+    blob_mode7 = kARDHPMediaBlobMode7ZlibGT;
+    blob_mode7_len = kARDHPMediaBlobMode7ZlibGTLen;
+  }
+  if (!ard_hp_env_flag_enabled("VNC_ARD_HP_MEDIA_USE_STATIC_PREFIX_MID")) {
+    /* Native ScreenSharing generates these 46-byte control chunks per stream. */
+    arc4random_buf(prefix1_dynamic, sizeof(prefix1_dynamic));
+    arc4random_buf(mid_dynamic, sizeof(mid_dynamic));
+    prefix1_data = prefix1_dynamic;
+    mid_data = mid_dynamic;
+  }
   plist_mode8 = ard_hp_make_binary_plist(8, endpoint_info, endpoint_info_len,
                                          blob_mode8, blob_mode8_len,
                                          call_id_mode8, &plist_mode8_len);
@@ -472,7 +528,8 @@ static uint8_t *ard_hp_build_adaptive_media_stream_options(size_t *out_len) {
                                          call_id_mode7, &plist_mode7_len);
   if (!plist_mode8 || !plist_mode7) goto cleanup;
 
-  total_len = 20 + kARDHPMediaOptionsPrefix1Len + plist_mode8_len +
+  if (plist_mode8_len > 0xffffu || plist_mode7_len > 0xffffu) goto cleanup;
+  total_len = ARD_HP_MEDIA_STREAM_OPTIONS_HEADER_LEN + kARDHPMediaOptionsPrefix1Len + plist_mode8_len +
               kARDHPMediaOptionsMidLen + plist_mode7_len;
   msg = (uint8_t *)calloc(1, total_len);
   if (!msg) goto cleanup;
@@ -481,18 +538,23 @@ static uint8_t *ard_hp_build_adaptive_media_stream_options(size_t *out_len) {
   ard_hp_store_be16(msg + 2, (uint16_t)(total_len - 4));
   ard_hp_store_be16(msg + 4, kARDHPMediaOptionsVersion);
   ard_hp_store_be32(msg + 6, kARDHPMediaOptionsFlags);
+  if (ard_hp_env_flag_enabled("VNC_ARD_HP_MEDIA_SESSION_ID_ZERO")) {
+    memset(msg + 20, 0, ARD_HP_MEDIA_STREAM_OPTIONS_SESSION_ID_LEN);
+  } else {
+    arc4random_buf(msg + 20, ARD_HP_MEDIA_STREAM_OPTIONS_SESSION_ID_LEN);
+  }
   audio_offer_len = (uint16_t)plist_mode8_len;
   video1_offer_len = (uint16_t)plist_mode7_len;
   video2_offer_len = 0;
   ard_hp_store_be16(msg + 10, audio_offer_len);
   ard_hp_store_be16(msg + 12, video1_offer_len);
   ard_hp_store_be16(msg + 14, video2_offer_len);
-  off = 20;
-  memcpy(msg + off, kARDHPMediaOptionsPrefix1, kARDHPMediaOptionsPrefix1Len);
+  off = ARD_HP_MEDIA_STREAM_OPTIONS_HEADER_LEN;
+  memcpy(msg + off, prefix1_data, kARDHPMediaOptionsPrefix1Len);
   off += kARDHPMediaOptionsPrefix1Len;
   memcpy(msg + off, plist_mode8, plist_mode8_len);
   off += plist_mode8_len;
-  memcpy(msg + off, kARDHPMediaOptionsMid, kARDHPMediaOptionsMidLen);
+  memcpy(msg + off, mid_data, kARDHPMediaOptionsMidLen);
   off += kARDHPMediaOptionsMidLen;
   memcpy(msg + off, plist_mode7, plist_mode7_len);
   off += plist_mode7_len;
@@ -501,8 +563,8 @@ static uint8_t *ard_hp_build_adaptive_media_stream_options(size_t *out_len) {
 cleanup:
   free(plist_mode7);
   free(plist_mode8);
-  free(blob_mode7);
-  free(blob_mode8);
+  free(blob_mode7_owned);
+  free(blob_mode8_owned);
   free(endpoint_info);
   return msg;
 }
@@ -855,6 +917,59 @@ static uint32_t ard_hp_read_be_u32(const uint8_t *p) {
          (uint32_t)p[3];
 }
 
+static void ard_hp_media_stream_flags_to_text(uint32_t flags, char *out, size_t out_len) {
+  size_t off = 0;
+#define APPEND_FLAG(name)                                                                \
+  do {                                                                                   \
+    int wrote;                                                                           \
+    if (!out || out_len == 0) break;                                                     \
+    wrote = snprintf(out + off, out_len - off, "%s%s", off ? "|" : "", (name));         \
+    if (wrote < 0) return;                                                               \
+    if ((size_t)wrote >= out_len - off) {                                                \
+      off = out_len - 1;                                                                 \
+      out[off] = '\0';                                                                   \
+      return;                                                                            \
+    }                                                                                    \
+    off += (size_t)wrote;                                                                \
+  } while (0)
+
+  if (!out || out_len == 0) return;
+  out[0] = '\0';
+  if (flags & ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_STREAM1_SUPPORTS_60FPS)
+    APPEND_FLAG("stream1_supports_60fps");
+  if (flags & ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_STREAM2_SUPPORTS_60FPS)
+    APPEND_FLAG("stream2_supports_60fps");
+  if (flags & ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_DO_NOT_SEND_CURSOR)
+    APPEND_FLAG("do_not_send_cursor");
+  if (flags & ARD_HP_MEDIA_STREAM_OPTIONS_FLAG_APPLE_REMOTE_DESKTOP_VIEWER)
+    APPEND_FLAG("apple_remote_desktop_viewer");
+  if (off == 0 && out_len > 1) snprintf(out, out_len, "none");
+#undef APPEND_FLAG
+}
+
+static int ard_hp_parse_media_stream_options_header(const uint8_t *buf, size_t len,
+                                                    uint16_t *declared_size,
+                                                    uint16_t *version,
+                                                    uint32_t *flags,
+                                                    uint16_t *audio_offer_len,
+                                                    uint16_t *video1_offer_len,
+                                                    uint16_t *video2_offer_len,
+                                                    int *declared_size_matches) {
+  if (!buf || len < ARD_HP_MEDIA_STREAM_OPTIONS_HEADER_LEN) return 0;
+  if (buf[0] != ARD_HP_MSG_MEDIA_STREAM_OPTIONS) return 0;
+  if (declared_size) *declared_size = ard_hp_read_be_u16(buf + 2);
+  if (version) *version = ard_hp_read_be_u16(buf + 4);
+  if (flags) *flags = ard_hp_read_be_u32(buf + 6);
+  if (audio_offer_len) *audio_offer_len = ard_hp_read_be_u16(buf + 10);
+  if (video1_offer_len) *video1_offer_len = ard_hp_read_be_u16(buf + 12);
+  if (video2_offer_len) *video2_offer_len = ard_hp_read_be_u16(buf + 14);
+  if (declared_size_matches) {
+    uint16_t msg_size = ard_hp_read_be_u16(buf + 2);
+    *declared_size_matches = ((size_t)msg_size == (len - 4));
+  }
+  return 1;
+}
+
 static int ard_hp_ensure_buf(uint8_t **buf, size_t *cap, size_t need) {
   uint8_t *next;
 
@@ -1154,8 +1269,10 @@ rfbBool rfbClientConfigureARDHP(rfbClient *client) {
 
 rfbBool rfbClientRunARDHPPrelude(rfbClient *client) {
   struct ard_hp_viewer_info_message viewer_info;
+  int adaptive_mode;
 
   if (!client) return FALSE;
+  adaptive_mode = ard_hp_env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
   rfbClientLog("ard-hp: sending cleartext pre-rekey setup\n");
   viewer_info = ard_hp_make_native_viewer_info();
   if (!send_blob(client, &viewer_info, sizeof(viewer_info), "ard-hp ViewerInfo")) return FALSE;
@@ -1168,7 +1285,11 @@ rfbBool rfbClientRunARDHPPrelude(rfbClient *client) {
     if (!send_blob(client, &msg, sizeof(msg), "ard-hp SetModeMessage")) return FALSE;
   }
   if (!rfbClientARDHPSendInitialDisplayConfiguration(client)) return FALSE;
-  if (!rfbClientARDHPSendPostAuthEncodings(client)) return FALSE;
+  if (adaptive_mode) {
+    rfbClientLog("ard-hp: adaptive mode defers pre-rekey SetEncodings until post-rekey transport\n");
+  } else {
+    if (!rfbClientARDHPSendPostAuthEncodings(client)) return FALSE;
+  }
   return TRUE;
 }
 
@@ -1356,6 +1477,14 @@ rfbBool rfbClientARDHPSendMediaStreamOptionsHex(rfbClient *client, const char *h
   uint8_t *buf;
   size_t len = 0;
   rfbBool ok;
+  uint16_t declared_size = 0;
+  uint16_t version = 0;
+  uint16_t audio_offer_len = 0;
+  uint16_t video1_offer_len = 0;
+  uint16_t video2_offer_len = 0;
+  uint32_t flags = 0;
+  int declared_size_matches = 0;
+  char flag_text[128];
 
   if (!client || !hex || !*hex) return TRUE;
   buf = ard_hp_decode_hex_blob(hex, &len);
@@ -1370,7 +1499,23 @@ rfbBool rfbClientARDHPSendMediaStreamOptionsHex(rfbClient *client, const char *h
     free(buf);
     return FALSE;
   }
-  rfbClientLog("ard-hp: sending MediaStreamOptions 0x1c (%lu bytes)\n", (unsigned long)len);
+  if (ard_hp_parse_media_stream_options_header(
+          buf, len, &declared_size, &version, &flags, &audio_offer_len,
+          &video1_offer_len, &video2_offer_len, &declared_size_matches)) {
+    ard_hp_media_stream_flags_to_text(flags, flag_text, sizeof(flag_text));
+    rfbClientLog("ard-hp: sending MediaStreamOptions 0x1c (%lu bytes ver=%u declared=%u match=%d flags=0x%08x[%s] audio_offer=%u video1_offer=%u video2_offer=%u)\n",
+                 (unsigned long)len,
+                 (unsigned)version,
+                 (unsigned)declared_size,
+                 declared_size_matches,
+                 (unsigned)flags,
+                 flag_text,
+                 (unsigned)audio_offer_len,
+                 (unsigned)video1_offer_len,
+                 (unsigned)video2_offer_len);
+  } else {
+    rfbClientLog("ard-hp: sending MediaStreamOptions 0x1c (%lu bytes)\n", (unsigned long)len);
+  }
   ok = WriteToRFBServer(client, (const char *)buf, (unsigned int)len);
   free(buf);
   return ok;
@@ -1383,7 +1528,11 @@ rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client) {
   uint16_t audio_offer_len;
   uint16_t video1_offer_len;
   uint16_t video2_offer_len;
+  uint16_t declared_size = 0;
+  uint16_t version = 0;
   uint32_t flags;
+  int declared_size_matches = 0;
+  char flag_text[128];
 
   if (!client) return FALSE;
   buf = ard_hp_build_adaptive_media_stream_options(&len);
@@ -1392,14 +1541,25 @@ rfbBool rfbClientARDHPSendAdaptiveMediaStreamOptions(rfbClient *client) {
     rfbClientErr("ard-hp: failed to build adaptive MediaStreamOptions 0x1c payload\n");
     return FALSE;
   }
-  audio_offer_len = len >= 12 ? ard_hp_read_be_u16(buf + 10) : 0;
-  video1_offer_len = len >= 14 ? ard_hp_read_be_u16(buf + 12) : 0;
-  video2_offer_len = len >= 16 ? ard_hp_read_be_u16(buf + 14) : 0;
-  flags = len >= 10 ? ard_hp_read_be_u32(buf + 6) : 0;
-  rfbClientLog("ard-hp: sending adaptive MediaStreamOptions 0x1c (%lu bytes version=%u flags=0x%08x audio_offer=%u video1_offer=%u video2_offer=%u)\n",
+  audio_offer_len = 0;
+  video1_offer_len = 0;
+  video2_offer_len = 0;
+  flags = 0;
+  if (!ard_hp_parse_media_stream_options_header(
+          buf, len, &declared_size, &version, &flags, &audio_offer_len,
+          &video1_offer_len, &video2_offer_len, &declared_size_matches)) {
+    declared_size = 0;
+    version = 0;
+    declared_size_matches = 0;
+  }
+  ard_hp_media_stream_flags_to_text(flags, flag_text, sizeof(flag_text));
+  rfbClientLog("ard-hp: sending adaptive MediaStreamOptions 0x1c (%lu bytes version=%u declared=%u match=%d flags=0x%08x[%s] audio_offer=%u video1_offer=%u video2_offer=%u)\n",
                (unsigned long)len,
-               len >= 6 ? (unsigned)ard_hp_read_be_u16(buf + 4) : 0,
+               (unsigned)version,
+               (unsigned)declared_size,
+               declared_size_matches,
                (unsigned)flags,
+               flag_text,
                (unsigned)audio_offer_len,
                (unsigned)video1_offer_len,
                (unsigned)video2_offer_len);

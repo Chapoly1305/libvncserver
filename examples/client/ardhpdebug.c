@@ -38,6 +38,12 @@
 #endif
 #endif
 
+#if defined(ARDHPDEBUG_HAS_FFMPEG)
+#include <libavcodec/avcodec.h>
+#include <libavutil/error.h>
+#include <libswscale/swscale.h>
+#endif
+
 #if !defined(NDEBUG)
 #define ARDHPDEBUG_DEBUG_BUILD 1
 #else
@@ -130,11 +136,34 @@ struct ard_hp_session_state {
   uint16_t media_stream_base_udp_port;
   uint16_t media_stream_next_udp_port;
   uint16_t media_stream_count;
+  int adaptive_media_options_sent;
+  int adaptive_delayed_setenc_pending;
+  int adaptive_delayed_setenc_sent;
+  unsigned int adaptive_post_1c_server_rects;
+  int adaptive_followup_encodings_sent;
 };
 
 static struct ard_hp_frame_stats g_frame = {0};
 static struct ard_hp_runtime_options g_runtime = {0};
 static struct ard_hp_session_state g_hp = {0};
+
+#if defined(ARDHPDEBUG_HAS_FFMPEG)
+struct ard_hp_video_decoder_state {
+  AVCodecContext *codec_ctx;
+  AVFrame *frame;
+  AVPacket *packet;
+  struct SwsContext *sws;
+  int codec;
+  int sws_src_w;
+  int sws_src_h;
+  int sws_dst_w;
+  int sws_dst_h;
+  unsigned long packets_seen;
+  unsigned long frames_decoded;
+};
+
+static struct ard_hp_video_decoder_state g_video = {0};
+#endif
 
 static void ardhp_minimal_release_log(const char *format, ...) {
   (void)format;
@@ -203,7 +232,6 @@ struct ard_hp_live_view_state {
   int crop_y;
   int crop_w;
   int crop_h;
-  int skip_next_fb_update;
 };
 
 static struct ard_hp_live_view_state g_live = {.needs_clear = 1};
@@ -236,7 +264,10 @@ static uint16_t ard_hp_display_width(rfbClient *client);
 static uint16_t ard_hp_display_height(rfbClient *client);
 static uint16_t ard_hp_request_width(rfbClient *client);
 static uint16_t ard_hp_request_height(rfbClient *client);
+static rfbBool ard_hp_resize_framebuffer_if_needed(rfbClient *client, uint16_t width,
+                                                    uint16_t height);
 static int ard_hp_adaptive_target_size(rfbClient *client, uint16_t *out_w, uint16_t *out_h);
+static int ard_hp_send_adaptive_media_options_after_stage1(rfbClient *client);
 static int ard_hp_request_full_refresh_now(rfbClient *client, uint16_t w, uint16_t h,
                                              const char *reason);
 static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *reason, int force);
@@ -254,6 +285,11 @@ static int ard_hp_resize_transition_active(void);
 static const char *ard_hp_probe_encoding_name(uint32_t encoding);
 static void ard_hp_maybe_probe_media_input(rfbClient *client);
 #endif
+static int ard_hp_decode_video_media_packet(rfbClient *client, uint32_t encoding,
+                                           const uint8_t *payload, size_t total_len);
+static void ard_hp_shutdown_video_decoder(void);
+static void on_fb_update(rfbClient *client, int x, int y, int w, int h);
+static void on_fb_update_done(rfbClient *client);
 
 static int ard_hp_should_suppress_incremental(void) {
   if (g_hp.media_stream_active) return 1;
@@ -1143,6 +1179,42 @@ static uint32_t read_be_u32(const uint8_t *p) {
          (uint32_t)p[3];
 }
 
+static int ard_hp_send_keyboard_source_share(rfbClient *client, const char *source_id, int shared) {
+  static const uint8_t kDisableMsg[8] = {0x1a, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0x00};
+  uint8_t *msg = NULL;
+  size_t source_len = 0;
+  size_t msg_len = 0;
+  int ok = 0;
+
+  if (!client) return 0;
+  if (!shared || !source_id || !*source_id) {
+    rfbClientLog("ard-hp: sending KeyboardSourceShare disable (8 bytes)\n");
+    return WriteToRFBServer(client, (const char *)kDisableMsg, sizeof(kDisableMsg));
+  }
+
+  source_len = strlen(source_id);
+  if (source_len > 0xfff0) source_len = 0xfff0;
+  msg_len = source_len + 8u;
+  msg = (uint8_t *)calloc(1, msg_len);
+  if (!msg) return 0;
+
+  msg[0] = 0x1a;
+  msg[2] = (uint8_t)(((source_len + 4u) >> 8) & 0xff);
+  msg[3] = (uint8_t)((source_len + 4u) & 0xff);
+  msg[4] = 0x00;
+  msg[5] = 0x01;
+  msg[6] = (uint8_t)((source_len >> 8) & 0xff);
+  msg[7] = (uint8_t)(source_len & 0xff);
+  memcpy(msg + 8, source_id, source_len);
+
+  rfbClientLog("ard-hp: sending KeyboardSourceShare enable source='%s' len=%lu\n",
+               source_id, (unsigned long)source_len);
+  ok = WriteToRFBServer(client, (const char *)msg, (unsigned int)msg_len);
+  free(msg);
+  return ok;
+}
+
+
 static void ard_hp_hex_encode(const uint8_t *src, size_t len, char *dst, size_t dst_len) {
   static const char hex[] = "0123456789abcdef";
   size_t i;
@@ -1226,6 +1298,403 @@ static size_t ard_hp_find_bytes(const uint8_t *buf, size_t len, const uint8_t *n
   }
   return (size_t)-1;
 }
+
+static int ard_hp_probe_h264_annexb(const uint8_t *buf, size_t len,
+                                    unsigned *out_start_codes,
+                                    unsigned *out_sps,
+                                    unsigned *out_pps,
+                                    unsigned *out_idr) {
+  size_t i;
+  unsigned start_codes = 0;
+  unsigned sps = 0;
+  unsigned pps = 0;
+  unsigned idr = 0;
+
+  if (!buf || len < 5) return 0;
+  for (i = 0; i + 4 < len; ++i) {
+    size_t nal_off;
+    uint8_t nal;
+    uint8_t nal_type;
+
+    if (buf[i] == 0x00 && buf[i + 1] == 0x00 && buf[i + 2] == 0x01) {
+      nal_off = i + 3;
+    } else if (i + 5 < len && buf[i] == 0x00 && buf[i + 1] == 0x00 &&
+               buf[i + 2] == 0x00 && buf[i + 3] == 0x01) {
+      nal_off = i + 4;
+    } else {
+      continue;
+    }
+    if (nal_off >= len) continue;
+    nal = buf[nal_off];
+    nal_type = (uint8_t)(nal & 0x1f);
+    if (nal_type == 0 || nal_type > 23) continue;
+    start_codes++;
+    if (nal_type == 7) sps++;
+    if (nal_type == 8) pps++;
+    if (nal_type == 5) idr++;
+  }
+
+  if (out_start_codes) *out_start_codes = start_codes;
+  if (out_sps) *out_sps = sps;
+  if (out_pps) *out_pps = pps;
+  if (out_idr) *out_idr = idr;
+  if (start_codes == 0) return 0;
+  if ((sps > 0 && pps > 0) || idr > 0) return 1;
+  return start_codes >= 3;
+}
+
+static int ard_hp_probe_h264_avcc(const uint8_t *buf, size_t len,
+                                  unsigned *out_nals,
+                                  unsigned *out_sps,
+                                  unsigned *out_pps,
+                                  unsigned *out_idr) {
+  size_t off = 0;
+  unsigned nals = 0;
+  unsigned sps = 0;
+  unsigned pps = 0;
+  unsigned idr = 0;
+
+  if (!buf || len < 8) return 0;
+  while (off + 4 <= len) {
+    uint32_t nal_len = read_be_u32(buf + off);
+    uint8_t nal_type;
+
+    off += 4;
+    if (nal_len == 0 || off + nal_len > len) break;
+    nal_type = (uint8_t)(buf[off] & 0x1f);
+    if (nal_type > 0 && nal_type <= 23) {
+      nals++;
+      if (nal_type == 7) sps++;
+      if (nal_type == 8) pps++;
+      if (nal_type == 5) idr++;
+    }
+    off += nal_len;
+  }
+
+  if (out_nals) *out_nals = nals;
+  if (out_sps) *out_sps = sps;
+  if (out_pps) *out_pps = pps;
+  if (out_idr) *out_idr = idr;
+  if (nals == 0) return 0;
+  if ((sps > 0 && pps > 0) || idr > 0) return 1;
+  return nals >= 3;
+}
+
+static void ard_hp_log_media_codec_probe(uint32_t encoding, const uint8_t *payload, size_t total_len) {
+  const uint8_t *body = payload;
+  size_t body_len = total_len;
+  unsigned annexb_start_codes = 0;
+  unsigned annexb_sps = 0;
+  unsigned annexb_pps = 0;
+  unsigned annexb_idr = 0;
+  unsigned avcc_nals = 0;
+  unsigned avcc_sps = 0;
+  unsigned avcc_pps = 0;
+  unsigned avcc_idr = 0;
+  int annexb_hit;
+  int avcc_hit;
+  const char *fmt = "unknown";
+  int likely_h264;
+
+  if (!payload || total_len == 0) return;
+  if (total_len >= 2) {
+    uint16_t declared = read_be_u16(payload);
+    if ((size_t)declared + 2 <= total_len) {
+      body = payload + 2;
+      body_len = declared;
+    }
+  }
+
+  annexb_hit = ard_hp_probe_h264_annexb(body, body_len,
+                                        &annexb_start_codes,
+                                        &annexb_sps,
+                                        &annexb_pps,
+                                        &annexb_idr);
+  avcc_hit = ard_hp_probe_h264_avcc(body, body_len,
+                                    &avcc_nals,
+                                    &avcc_sps,
+                                    &avcc_pps,
+                                    &avcc_idr);
+  likely_h264 = annexb_hit || avcc_hit;
+  if (annexb_hit) fmt = "annexb";
+  else if (avcc_hit) fmt = "avcc";
+
+  rfbClientLog(
+      "ard-hp: codec-probe encoding=0x%08x likely_h264=%s format=%s body_len=%lu annexb(start=%u sps=%u pps=%u idr=%u) avcc(nals=%u sps=%u pps=%u idr=%u)\n",
+      (unsigned)encoding,
+      likely_h264 ? "yes" : "no",
+      fmt,
+      (unsigned long)body_len,
+      annexb_start_codes,
+      annexb_sps,
+      annexb_pps,
+      annexb_idr,
+      avcc_nals,
+      avcc_sps,
+      avcc_pps,
+      avcc_idr);
+}
+
+#if defined(ARDHPDEBUG_HAS_FFMPEG)
+static void ard_hp_log_av_error(const char *prefix, int errnum) {
+  char errbuf[128];
+  errbuf[0] = '\0';
+  av_strerror(errnum, errbuf, sizeof(errbuf));
+  rfbClientErr("ard-hp: %s: %s (%d)\n", prefix, errbuf, errnum);
+}
+
+enum ard_hp_video_codec {
+  ARD_HP_VIDEO_CODEC_UNKNOWN = 0,
+  ARD_HP_VIDEO_CODEC_HEVC = 1,
+  ARD_HP_VIDEO_CODEC_H264 = 2,
+};
+
+static const char *ard_hp_video_codec_name(enum ard_hp_video_codec codec) {
+  switch (codec) {
+    case ARD_HP_VIDEO_CODEC_HEVC: return "hevc";
+    case ARD_HP_VIDEO_CODEC_H264: return "h264";
+    default: return "unknown";
+  }
+}
+
+static enum AVCodecID ard_hp_video_codec_to_ffmpeg_id(enum ard_hp_video_codec codec) {
+  switch (codec) {
+    case ARD_HP_VIDEO_CODEC_HEVC: return AV_CODEC_ID_HEVC;
+    case ARD_HP_VIDEO_CODEC_H264: return AV_CODEC_ID_H264;
+    default: return AV_CODEC_ID_NONE;
+  }
+}
+
+static int ard_hp_ensure_video_decoder(enum ard_hp_video_codec codec_kind) {
+  const AVCodec *decoder;
+  enum AVCodecID codec_id;
+  const char *codec_name;
+  int ret;
+
+  if (codec_kind == ARD_HP_VIDEO_CODEC_UNKNOWN) return 0;
+  if (g_video.codec_ctx && g_video.frame && g_video.packet && g_video.codec == (int)codec_kind) return 1;
+
+  ard_hp_shutdown_video_decoder();
+
+  codec_id = ard_hp_video_codec_to_ffmpeg_id(codec_kind);
+  codec_name = ard_hp_video_codec_name(codec_kind);
+  decoder = avcodec_find_decoder(codec_id);
+  if (!decoder) {
+    rfbClientErr("ard-hp: ffmpeg %s decoder not found\n", codec_name);
+    return 0;
+  }
+
+  g_video.codec_ctx = avcodec_alloc_context3(decoder);
+  if (!g_video.codec_ctx) return 0;
+  ret = avcodec_open2(g_video.codec_ctx, decoder, NULL);
+  if (ret < 0) {
+    char prefix[96];
+    snprintf(prefix, sizeof(prefix), "avcodec_open2(%s) failed", codec_name);
+    ard_hp_log_av_error(prefix, ret);
+    avcodec_free_context(&g_video.codec_ctx);
+    return 0;
+  }
+
+  g_video.frame = av_frame_alloc();
+  g_video.packet = av_packet_alloc();
+  if (!g_video.frame || !g_video.packet) {
+    ard_hp_shutdown_video_decoder();
+    return 0;
+  }
+  g_video.codec = (int)codec_kind;
+  return 1;
+}
+
+static int ard_hp_push_decoded_frame(rfbClient *client, AVFrame *frame) {
+  uint8_t *dst_data[4];
+  int dst_linesize[4];
+  int ret;
+  int src_w;
+  int src_h;
+  int dst_w;
+  int dst_h;
+  int dst_stride;
+
+  if (!client || !frame || !client->frameBuffer) return 0;
+
+  src_w = frame->width;
+  src_h = frame->height;
+  dst_w = client->width;
+  dst_h = client->height;
+
+  if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return 0;
+
+  if ((src_w != dst_w || src_h != dst_h) && (uint16_t)src_w != 0 && (uint16_t)src_h != 0) {
+    if (!ard_hp_resize_framebuffer_if_needed(client, (uint16_t)src_w, (uint16_t)src_h)) return 0;
+    dst_w = client->width;
+    dst_h = client->height;
+  }
+
+  if (dst_w <= 0 || dst_h <= 0 || !client->frameBuffer) return 0;
+
+  dst_stride = dst_w * 4;
+  dst_data[0] = client->frameBuffer;
+  dst_data[1] = NULL;
+  dst_data[2] = NULL;
+  dst_data[3] = NULL;
+  dst_linesize[0] = dst_stride;
+  dst_linesize[1] = 0;
+  dst_linesize[2] = 0;
+  dst_linesize[3] = 0;
+
+  if (!g_video.sws || g_video.sws_src_w != src_w || g_video.sws_src_h != src_h || g_video.sws_dst_w != dst_w ||
+      g_video.sws_dst_h != dst_h) {
+    sws_freeContext(g_video.sws);
+    g_video.sws = sws_getContext(src_w, src_h, (enum AVPixelFormat)frame->format, dst_w, dst_h, AV_PIX_FMT_BGRA,
+                                SWS_BILINEAR, NULL, NULL, NULL);
+    if (!g_video.sws) return 0;
+    g_video.sws_src_w = src_w;
+    g_video.sws_src_h = src_h;
+    g_video.sws_dst_w = dst_w;
+    g_video.sws_dst_h = dst_h;
+  }
+
+  ret = sws_scale(g_video.sws, (const uint8_t *const *)frame->data, frame->linesize, 0, src_h, dst_data, dst_linesize);
+  if (ret <= 0) return 0;
+
+  g_video.frames_decoded++;
+  on_fb_update(client, 0, 0, dst_w, dst_h);
+  on_fb_update_done(client);
+  return 1;
+}
+
+static int ard_hp_decode_video_media_packet(rfbClient *client, uint32_t encoding, const uint8_t *payload, size_t total_len) {
+  uint8_t *bytestream = NULL;
+  size_t bytestream_len = 0;
+  rfbBool from_length_prefix = FALSE;
+  enum ard_hp_video_codec active_codec;
+  enum ard_hp_video_codec fallback_codec;
+  int ret;
+  int decoded_frames = 0;
+
+  if (!client || !payload || total_len == 0) return 1;
+  if (encoding != 0x3f3 && encoding != 0x3ea) return 1;
+
+  if (!rfbClientARDHPExtractVideoBytestream(encoding, payload, total_len, &bytestream, &bytestream_len,
+                                            &from_length_prefix)) {
+    return 1;
+  }
+  if (!bytestream || bytestream_len == 0) {
+    free(bytestream);
+    return 1;
+  }
+
+  active_codec = (enum ard_hp_video_codec)g_video.codec;
+  if (active_codec == ARD_HP_VIDEO_CODEC_UNKNOWN) {
+    active_codec = ARD_HP_VIDEO_CODEC_HEVC;
+  }
+
+  if (!ard_hp_ensure_video_decoder(active_codec)) {
+    if (active_codec == ARD_HP_VIDEO_CODEC_HEVC) {
+      active_codec = ARD_HP_VIDEO_CODEC_H264;
+      if (!ard_hp_ensure_video_decoder(active_codec)) {
+        free(bytestream);
+        return 1;
+      }
+    } else {
+      free(bytestream);
+      return 1;
+    }
+  }
+
+  g_video.packets_seen++;
+  ret = av_new_packet(g_video.packet, (int)bytestream_len);
+  if (ret < 0) {
+    ard_hp_log_av_error("av_new_packet failed", ret);
+    free(bytestream);
+    return 0;
+  }
+  memcpy(g_video.packet->data, bytestream, bytestream_len);
+
+  ret = avcodec_send_packet(g_video.codec_ctx, g_video.packet);
+  av_packet_unref(g_video.packet);
+  if (ret < 0 && ret != AVERROR(EAGAIN)) {
+    fallback_codec = (active_codec == ARD_HP_VIDEO_CODEC_HEVC) ? ARD_HP_VIDEO_CODEC_H264 : ARD_HP_VIDEO_CODEC_HEVC;
+    ard_hp_shutdown_video_decoder();
+    if (ard_hp_ensure_video_decoder(fallback_codec)) {
+      ret = av_new_packet(g_video.packet, (int)bytestream_len);
+      if (ret >= 0) {
+        memcpy(g_video.packet->data, bytestream, bytestream_len);
+        ret = avcodec_send_packet(g_video.codec_ctx, g_video.packet);
+        av_packet_unref(g_video.packet);
+      }
+    }
+    free(bytestream);
+    bytestream = NULL;
+    if (ret < 0) {
+      ard_hp_log_av_error("avcodec_send_packet failed", ret);
+      return 1;
+    }
+  } else {
+    free(bytestream);
+    bytestream = NULL;
+  }
+
+  if (ret < 0 && ret != AVERROR(EAGAIN)) {
+    ard_hp_log_av_error("avcodec_send_packet failed", ret);
+    return 1;
+  }
+
+  for (;;) {
+    ret = avcodec_receive_frame(g_video.codec_ctx, g_video.frame);
+    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+    if (ret < 0) {
+      ard_hp_log_av_error("avcodec_receive_frame failed", ret);
+      break;
+    }
+    if (ard_hp_push_decoded_frame(client, g_video.frame)) {
+      decoded_frames++;
+    }
+    av_frame_unref(g_video.frame);
+  }
+
+  if (g_video.packets_seen % 120 == 0) {
+    rfbClientLog("ard-hp: video decode codec=%s packets=%lu frames=%lu last_input=%s decoded_now=%d\n",
+                 ard_hp_video_codec_name((enum ard_hp_video_codec)g_video.codec),
+                 g_video.packets_seen,
+                 g_video.frames_decoded,
+                 from_length_prefix ? "length-prefixed" : "annexb",
+                 decoded_frames);
+  }
+  return 1;
+}
+
+static void ard_hp_shutdown_video_decoder(void) {
+  sws_freeContext(g_video.sws);
+  g_video.sws = NULL;
+  g_video.sws_src_w = 0;
+  g_video.sws_src_h = 0;
+  g_video.sws_dst_w = 0;
+  g_video.sws_dst_h = 0;
+  g_video.codec = ARD_HP_VIDEO_CODEC_UNKNOWN;
+  if (g_video.packet) {
+    av_packet_free(&g_video.packet);
+  }
+  if (g_video.frame) {
+    av_frame_free(&g_video.frame);
+  }
+  if (g_video.codec_ctx) {
+    avcodec_free_context(&g_video.codec_ctx);
+  }
+}
+#else
+static int ard_hp_decode_video_media_packet(rfbClient *client, uint32_t encoding,
+                                           const uint8_t *payload, size_t total_len) {
+  (void)client;
+  (void)encoding;
+  (void)payload;
+  (void)total_len;
+  return 1;
+}
+
+static void ard_hp_shutdown_video_decoder(void) {
+}
+#endif
 
 static void ard_hp_log_media_init_payload(const uint8_t *payload, size_t total_len) {
   static const uint8_t kBplist[] = "bplist00";
@@ -1590,6 +2059,7 @@ static double ard_hp_runtime_scale_factor(rfbClient *client) {
 #endif
 }
 static int ard_hp_send_post_rekey_setup(rfbClient *client);
+static int ard_hp_send_adaptive_media_options_after_stage1(rfbClient *client);
 
 static int configure_ard_hp_mode(rfbClient *client) {
   if (!client) return 1;
@@ -1604,8 +2074,8 @@ static int run_ard_hp_setup(rfbClient *client) {
 static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   uint16_t region_w;
   uint16_t region_h;
-  const char *media_options_hex = NULL;
   int adaptive_mode = 0;
+  int send_auto_pasteboard = 1;
 
   if (!client || g_hp.post_rekey_sent) return 1;
   adaptive_mode = g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
@@ -1627,20 +2097,22 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
   }
   if (g_hp.post_rekey_phase == 1) g_hp.post_rekey_phase = 2;
 
-  if (!rfbClientARDHPSendAutoPasteboardCommand(client, 1)) return 0;
-  if (!rfbClientARDHPSendScaleFactor(client, ard_hp_runtime_scale_factor(client))) return 0;
-  media_options_hex = getenv("VNC_ARD_HP_MEDIA_STREAM_OPTIONS_HEX");
-  if (adaptive_mode) {
-    if (media_options_hex && *media_options_hex) {
-      if (!rfbClientARDHPSendMediaStreamOptionsHex(client, media_options_hex)) return 0;
-    } else {
-      if (!rfbClientARDHPSendAdaptiveMediaStreamOptions(client)) return 0;
-    }
+  if (adaptive_mode && !env_flag_enabled("VNC_ARD_HP_ADAPTIVE_SEND_AUTO_PASTEBOARD")) {
+    send_auto_pasteboard = 0;
   }
+  if (env_flag_enabled("VNC_ARD_HP_DISABLE_AUTO_PASTEBOARD")) {
+    send_auto_pasteboard = 0;
+  }
+  if (send_auto_pasteboard) {
+    if (!rfbClientARDHPSendAutoPasteboardCommand(client, 1)) return 0;
+  } else {
+    rfbClientLog("ard-hp: adaptive mode skipping AutoPasteboard (set VNC_ARD_HP_ADAPTIVE_SEND_AUTO_PASTEBOARD=1 to enable)\n");
+  }
+  if (!rfbClientARDHPSendScaleFactor(client, ard_hp_runtime_scale_factor(client))) return 0;
   if (!SendCurrentPixelFormat(client)) return 0;
   if (!SendFramebufferUpdateRequest(client, 0, 0, region_w, region_h, FALSE)) return 0;
   g_hp.initial_full_refresh_done = 0;
-  g_hp.initial_full_refresh_retries = 3;
+  g_hp.initial_full_refresh_retries = adaptive_mode ? 0 : 3;
   g_hp.displayinfo2_seen = 0;
   g_hp.dynamic_request_timed_out = 0;
   g_hp.dynamic_refresh_retries = 0;
@@ -1650,12 +2122,48 @@ static int ard_hp_send_post_rekey_setup(rfbClient *client) {
                (unsigned)region_w, (unsigned)region_h, g_hp.initial_full_refresh_retries);
   if (!rfbClientARDHPSendAutoFramebufferUpdate(client, region_w, region_h)) return 0;
   if (adaptive_mode) {
-    rfbClientLog("ard-hp: sending adaptive follow-up SetEncodings after media setup\n");
-    if (!rfbClientARDHPSendPostAuthEncodings(client)) return 0;
+    rfbClientLog("ard-hp: adaptive mode defers MediaStreamOptions 0x1c until media-init stage1 (0x3f2)\n");
   }
   g_hp.auto_fbu_active = 1;
   g_hp.post_rekey_phase = 3;
   g_hp.post_rekey_sent = 1;
+  return 1;
+}
+
+static int ard_hp_send_adaptive_media_options_after_stage1(rfbClient *client) {
+  uint16_t region_w;
+  uint16_t region_h;
+  const char *media_options_hex = NULL;
+
+  if (!client) return 1;
+  if (!g_runtime.ard_hp_mode || !env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE")) return 1;
+  if (g_hp.adaptive_media_options_sent) return 1;
+
+  region_w = ard_hp_request_width(client);
+  region_h = ard_hp_request_height(client);
+
+  rfbClientLog("ard-hp: adaptive stage1 follow-up step=SetPixelFormat\n");
+  if (!SendCurrentPixelFormat(client)) return 0;
+  rfbClientLog("ard-hp: adaptive stage1 follow-up step=FramebufferUpdateRequest %ux%u\n",
+               (unsigned)region_w, (unsigned)region_h);
+  if (!SendFramebufferUpdateRequest(client, 0, 0, region_w, region_h, FALSE)) return 0;
+  rfbClientLog("ard-hp: adaptive stage1 follow-up step=AutoFrameBufferUpdate %ux%u\n",
+               (unsigned)region_w, (unsigned)region_h);
+  if (!rfbClientARDHPSendAutoFramebufferUpdate(client, region_w, region_h)) return 0;
+
+  media_options_hex = getenv("VNC_ARD_HP_MEDIA_STREAM_OPTIONS_HEX");
+  if (media_options_hex && *media_options_hex) {
+    rfbClientLog("ard-hp: adaptive stage1 follow-up step=MediaStreamOptionsHex\n");
+    if (!rfbClientARDHPSendMediaStreamOptionsHex(client, media_options_hex)) return 0;
+  } else {
+    rfbClientLog("ard-hp: adaptive stage1 follow-up step=AdaptiveMediaStreamOptions\n");
+    if (!rfbClientARDHPSendAdaptiveMediaStreamOptions(client)) return 0;
+  }
+  g_hp.adaptive_media_options_sent = 1;
+  g_hp.adaptive_delayed_setenc_pending = env_flag_enabled("VNC_ARD_HP_ADAPTIVE_DELAYED_SET_ENCODINGS");
+  g_hp.adaptive_delayed_setenc_sent = 0;
+  g_hp.adaptive_post_1c_server_rects = 0;
+  rfbClientLog("ard-hp: adaptive stage1 follow-up sent (SetPixelFormat + full refresh + AutoFBU + MediaStreamOptions 0x1c)\n");
   return 1;
 }
 
@@ -2526,6 +3034,9 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   uint16_t display_h = 0;
 
   if (!client || !g_runtime.live_view || !g_runtime.ard_hp_mode) return 1;
+  if (env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE") && g_hp.media_stream_message_type < 2) {
+    return 1;
+  }
   if (ard_hp_nonhidpi_enabled()) {
     g_live.pending_dynamic_resize = 0;
     g_live.runtime_size_valid = 0;
@@ -3600,7 +4111,7 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
 static int kHighPerfProbeEncodings[] = {0x44f, 0x450, 0x451, 0x453, 0x455, 0x456, 0x3ea, 0x3f2, 0x3f3, 0};
 
 static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateRectHeader *rect) {
-  g_live.skip_next_fb_update = 1;
+  if (client) client->suppressCurrentFramebufferUpdateCallbacks = TRUE;
   uint8_t buf[36];
   uint8_t hdr[2];
   uint8_t cursor_hdr[8];
@@ -3620,6 +4131,8 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   uint8_t next_iv[16];
   uint16_t payload_len;
   size_t total_len;
+  int is_media_stage1 = 0;
+  int is_media_stage2 = 0;
 
   if (!client || !rect) return FALSE;
   if ((uint32_t)rect->encoding == 0x44f) {
@@ -3638,6 +4151,11 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     if (!rfbClientARDHPEnableTransport(client, next_key, next_iv, counter)) return FALSE;
     g_hp.post_rekey_ready = 1;
     g_hp.post_rekey_phase = 0;
+    g_hp.adaptive_media_options_sent = 0;
+    g_hp.adaptive_delayed_setenc_pending = 0;
+    g_hp.adaptive_delayed_setenc_sent = 0;
+    g_hp.adaptive_post_1c_server_rects = 0;
+    g_hp.adaptive_followup_encodings_sent = 0;
     if (adaptive_mode) {
       if (!ard_hp_send_post_rekey_setup(client)) return FALSE;
       g_hp.post_rekey_ready = 0;
@@ -3709,7 +4227,33 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     ard_hp_dump_media_packet((uint32_t)rect->encoding, payload, total_len);
     if (client) client->suppressNextIncrementalRequest = TRUE;
   }
+  if (g_hp.adaptive_delayed_setenc_pending &&
+      !g_hp.adaptive_delayed_setenc_sent &&
+      (uint32_t)rect->encoding != 0x3f2 &&
+      (uint32_t)rect->encoding != 0x3f3 &&
+      (uint32_t)rect->encoding != 0x3ea) {
+    g_hp.adaptive_post_1c_server_rects++;
+    if (g_hp.adaptive_post_1c_server_rects >= 2) {
+      rfbClientLog("ard-hp: adaptive delayed follow-up sending SetEncodings after %u post-0x1c server rects\n",
+                   g_hp.adaptive_post_1c_server_rects);
+      if (!rfbClientARDHPSendPostAuthEncodings(client)) {
+        free(payload);
+        return FALSE;
+      }
+      g_hp.adaptive_delayed_setenc_sent = 1;
+      g_hp.adaptive_delayed_setenc_pending = 0;
+      g_hp.adaptive_followup_encodings_sent = 1;
+    }
+  }
   if ((uint32_t)rect->encoding == 0x3f2) {
+    if (total_len >= 6) {
+      is_media_stage1 = (total_len >= 36 &&
+                         read_be_u16(payload + 0) == 36 &&
+                         read_be_u16(payload + 2) == 1 &&
+                         read_be_u16(payload + 4) == 1);
+      is_media_stage2 = (read_be_u16(payload + 2) == 2 &&
+                         read_be_u16(payload + 4) == 2);
+    }
     ard_hp_dump_media_init_payload(payload, total_len);
     ard_hp_log_media_init_payload(payload, total_len);
     g_hp.media_stream_active = 1;
@@ -3734,16 +4278,41 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
                  (unsigned)g_hp.media_stream_count,
                  (unsigned)g_hp.media_stream_next_udp_port,
                  (unsigned)payload_len);
+    if (g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE")) {
+      if (is_media_stage1) {
+        if (!ard_hp_send_adaptive_media_options_after_stage1(client)) {
+          free(payload);
+          return FALSE;
+        }
+      } else if (is_media_stage2 && !g_hp.adaptive_followup_encodings_sent) {
+        rfbClientLog("ard-hp: adaptive stage2 received; sending follow-up SetEncodings\n");
+        if (!rfbClientARDHPSendPostAuthEncodings(client)) {
+          free(payload);
+          return FALSE;
+        }
+        g_hp.adaptive_followup_encodings_sent = 1;
+      } else if (g_hp.media_stream_message_type == 1) {
+        rfbClientLog("ard-hp: observed non-stage1 MediaStreamMessage1 payload (len=%u version=%u type=%u), skipping 0x1c resend\n",
+                     (unsigned)payload_len,
+                     (unsigned)g_hp.media_stream_version,
+                     (unsigned)g_hp.media_stream_message_type);
+      }
+    }
     ard_hp_maybe_probe_media_input(client);
     free(payload);
     return TRUE;
   }
   if ((uint32_t)rect->encoding == 0x3f3 || (uint32_t)rect->encoding == 0x3ea) {
+    ard_hp_log_media_codec_probe((uint32_t)rect->encoding, payload, total_len);
     rfbClientLog("ard-hp: media packet encoding=0x%08x (%s) payload_len=%u total_len=%lu\n",
                  (unsigned)rect->encoding,
                  ard_hp_probe_encoding_name((uint32_t)rect->encoding),
                  (unsigned)payload_len,
                  (unsigned long)total_len);
+    if (!ard_hp_decode_video_media_packet(client, (uint32_t)rect->encoding, payload, total_len)) {
+      free(payload);
+      return FALSE;
+    }
     free(payload);
     return TRUE;
   }
@@ -3778,6 +4347,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     }
     {
       int startup_full_refresh_requested = 0;
+      int startup_full_refresh_deferred = 0;
       if (client && first_display_layout) {
       int startup_resize_sent = 0;
       int startup_resize_allowed = live_view_should_drive_dynamic_resize();
@@ -3832,11 +4402,17 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       if (!startup_resize_sent) {
         uint16_t request_w = ard_hp_request_width(client);
         uint16_t request_h = ard_hp_request_height(client);
-        if (!ard_hp_request_full_refresh_now(client, request_w, request_h, "first-display-layout")) {
-          free(payload);
-          return FALSE;
+        int adaptive_mode = g_runtime.ard_hp_mode && env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE");
+        if (adaptive_mode && !g_hp.adaptive_media_options_sent) {
+          rfbClientLog("ard-hp: adaptive mode defers first-layout full refresh until stage1 follow-up 0x1c\n");
+          startup_full_refresh_deferred = 1;
+        } else {
+          if (!ard_hp_request_full_refresh_now(client, request_w, request_h, "first-display-layout")) {
+            free(payload);
+            return FALSE;
+          }
+          startup_full_refresh_requested = 1;
         }
-        startup_full_refresh_requested = 1;
       }
       }
       if (client && scaled_w != 0 && scaled_h != 0 &&
@@ -3877,7 +4453,8 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
           g_hp.dynamic_refresh_requested_ms = 0;
           g_hp.dynamic_refresh_queued_for_request = 1;
         }
-      } else if (!(first_display_layout && startup_full_refresh_requested)) {
+      } else if (!(first_display_layout && startup_full_refresh_requested) &&
+                 !(first_display_layout && startup_full_refresh_deferred)) {
         g_hp.pending_refresh_w = request_w;
         g_hp.pending_refresh_h = request_h;
         g_hp.initial_full_refresh_retries = 0;
@@ -3886,6 +4463,37 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
       }
     }
     }
+  }
+  if ((uint32_t)rect->encoding == 0x455 && env_flag_enabled("VNC_ARD_HP_SEND_KEYBOARD_SOURCE_SHARE")) {
+    const char *fallback_source = "com.apple.keylayout.US";
+    const char *mode = getenv("VNC_ARD_HP_KEYBOARD_SOURCE_SHARE_MODE");
+    char *source = NULL;
+    uint16_t source_len = 0;
+    const uint8_t *source_ptr = NULL;
+    int shared = 1;
+
+    if (mode && *mode && strcasecmp(mode, "disable") == 0) shared = 0;
+
+    if (total_len >= 10) {
+      source_len = read_be_u16(payload + 8);
+      if ((size_t)source_len + 10u <= total_len) source_ptr = payload + 10;
+    }
+    if (source_ptr && source_len > 0) {
+      source = (char *)calloc(1, (size_t)source_len + 1u);
+      if (!source) {
+        free(payload);
+        return FALSE;
+      }
+      memcpy(source, source_ptr, source_len);
+      source[source_len] = '\0';
+      while (source_len > 0 && source[source_len - 1] == '\0') source[--source_len] = '\0';
+    }
+    if (!ard_hp_send_keyboard_source_share(client, source ? source : fallback_source, shared)) {
+      free(source);
+      free(payload);
+      return FALSE;
+    }
+    free(source);
   }
   free(payload);
   return TRUE;
@@ -4001,10 +4609,6 @@ static rfbBool malloc_fb(rfbClient *client) {
 }
 
 static void on_fb_update(rfbClient *client, int x, int y, int w, int h) {
-  if (g_live.skip_next_fb_update) {
-    g_live.skip_next_fb_update = 0;
-    return;
-  }
   if (!client || w <= 0 || h <= 0) return;
 
   /* Safety: clamp and validate coordinates against actual allocated dimensions */
@@ -4201,6 +4805,7 @@ int main(int argc, char **argv) {
 #endif
 
   signal(SIGINT, on_sigint);
+  signal(SIGPIPE, SIG_IGN);
   g_runtime.live_view = env_flag_enabled("VNC_LIVE_VIEW");
   g_runtime.live_view_vsync = 0;
   g_runtime.low_latency_input = 1;
@@ -4297,6 +4902,7 @@ int main(int argc, char **argv) {
 
   if (!run_ard_hp_setup(client)) {
     rfbClientErr("ard-hp: setup failed\n");
+    ard_hp_shutdown_video_decoder();
     rfbClientCleanup(client);
 #if defined(ARDHPDEBUG_HAS_SDL)
     destroy_live_view();
@@ -4345,6 +4951,7 @@ wait_for_server:
 #endif
   }
 
+  ard_hp_shutdown_video_decoder();
   rfbClientCleanup(client);
 #if defined(ARDHPDEBUG_HAS_SDL)
   destroy_live_view();
