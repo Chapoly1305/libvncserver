@@ -194,14 +194,18 @@ struct ard_hp_udp_media_state {
   long long last_decoder_flush_ms;
   long long last_media_reinit_ms;
   long long last_rr_keepalive_ms;
+  long long last_source_failover_ms;
   unsigned long refresh_retries;
   unsigned long pli_requests_sent;
   unsigned long rr_keepalives_sent;
   unsigned long last_fu_drop_observed;
+  unsigned long last_failover_fu_drop_observed;
+  unsigned long source_failover_count;
   unsigned long decoder_flushes;
   unsigned long media_reinit_attempts;
   unsigned long last_decoded_frames_observed;
   long long last_decode_progress_ms;
+  int first_failure_logged;
   uint32_t rtcp_sender_ssrc;
   uint8_t rtcp_fir_seq;
 };
@@ -276,6 +280,20 @@ struct ard_hp_rtp_ssrc_track {
   unsigned long ps_units;
   unsigned long idr_units;
   unsigned long au_emitted;
+  unsigned long seq_packets;
+  uint16_t seq_last;
+  int seq_last_valid;
+  unsigned long seq_gap_events;
+  unsigned long seq_gap_packets;
+  unsigned long seq_reorder_events;
+  unsigned long seq_duplicate_packets;
+  unsigned long donl_packets;
+  uint16_t donl_last;
+  int donl_last_valid;
+  unsigned long donl_gap_events;
+  unsigned long donl_gap_steps;
+  unsigned long donl_backward_events;
+  unsigned long donl_duplicate_events;
 };
 
 struct ard_hp_lane_decoder {
@@ -381,6 +399,16 @@ struct ard_hp_video_decoder_state {
   unsigned long lane_decoder_overflow;
   struct ard_hp_adaptive_fu_ctx adaptive_fu[ARD_HP_ADAPTIVE_FU_CTX_MAX];
   unsigned long adaptive_fu_overflow;
+  unsigned long hevc_nalu_type_counts[64];
+  unsigned long hevc_fu_type_counts[64];
+  unsigned long hevc_donl_packets;
+  unsigned long hevc_donl_nonzero;
+  unsigned long hevc_donl_buffered;
+  unsigned long hevc_donl_emitted;
+  unsigned long hevc_donl_dropped_old;
+  unsigned long hevc_donl_dropped_overflow;
+  unsigned long hevc_fu_start_packets;
+  unsigned long hevc_fu_end_packets;
 #if defined(__APPLE__) && defined(ARDHPDEBUG_HAS_VIDEOTOOLBOX)
   VTDecompressionSessionRef vt_session;
   CMVideoFormatDescriptionRef vt_format_desc;
@@ -1416,6 +1444,14 @@ static int ard_hp_hidpi_enabled(void) {
 
 static int ard_hp_nonhidpi_enabled(void) {
   return !ard_hp_hidpi_enabled();
+}
+
+static int ard_hp_dynamic_resize_enabled(void) {
+  const char *adaptive_resize_env = ard_hp_getenv_compat("VNC_ARD_HP_ADAPTIVE_DYNAMIC_RESIZE");
+  if (!ard_hp_hidpi_enabled()) return 0;
+  if (!env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE")) return 1;
+  if (!adaptive_resize_env || !*adaptive_resize_env) return 0;
+  return env_flag_enabled("VNC_ARD_HP_ADAPTIVE_DYNAMIC_RESIZE");
 }
 
 static double ard_hp_input_rect_scale(void) {
@@ -2472,6 +2508,10 @@ static int ard_hp_rtp_seq_cmp(uint16_t a, uint16_t b) {
   return (int16_t)(a - b);
 }
 
+static int ard_hp_donl_cmp(uint16_t a, uint16_t b) {
+  return (int16_t)(a - b);
+}
+
 static int ard_hp_adaptive_fu_store_pending(struct ard_hp_adaptive_fu_ctx *ctx,
                                             uint16_t seq,
                                             const uint8_t *frag, size_t frag_len,
@@ -2523,6 +2563,54 @@ static int ard_hp_adaptive_fu_take_pending(struct ard_hp_adaptive_fu_ctx *ctx,
   return 0;
 }
 
+static void ard_hp_note_rtp_seq_donl(uint32_t ssrc, uint16_t seq, int has_donl, uint16_t donl) {
+  struct ard_hp_rtp_ssrc_track *track = ard_hp_find_rtp_ssrc_track(ssrc, 1);
+  if (!track) return;
+  track->seq_packets++;
+  if (!track->seq_last_valid) {
+    track->seq_last = seq;
+    track->seq_last_valid = 1;
+  } else {
+    int seq_cmp = ard_hp_rtp_seq_cmp(seq, (uint16_t)(track->seq_last + 1u));
+    if (seq_cmp == 0) {
+      /* in-order */
+    } else if (seq_cmp > 0) {
+      uint16_t gap = (uint16_t)(seq - track->seq_last);
+      if (gap > 1u) {
+        track->seq_gap_events++;
+        track->seq_gap_packets += (unsigned long)(gap - 1u);
+      }
+    } else {
+      if (seq == track->seq_last) track->seq_duplicate_packets++;
+      else track->seq_reorder_events++;
+    }
+    if (ard_hp_rtp_seq_cmp(seq, track->seq_last) > 0) track->seq_last = seq;
+  }
+
+  if (!has_donl) return;
+  track->donl_packets++;
+  if (!track->donl_last_valid) {
+    track->donl_last = donl;
+    track->donl_last_valid = 1;
+    return;
+  }
+  {
+    int donl_cmp = ard_hp_donl_cmp(donl, track->donl_last);
+    if (donl_cmp > 0) {
+      uint16_t gap = (uint16_t)(donl - track->donl_last);
+      if (gap > 1u) {
+        track->donl_gap_events++;
+        track->donl_gap_steps += (unsigned long)(gap - 1u);
+      }
+      track->donl_last = donl;
+    } else if (donl_cmp == 0) {
+      track->donl_duplicate_events++;
+    } else {
+      track->donl_backward_events++;
+    }
+  }
+}
+
 static struct ard_hp_adaptive_fu_ctx *ard_hp_get_adaptive_fu_ctx(uint32_t ssrc, int create) {
   unsigned long i;
   struct ard_hp_adaptive_fu_ctx *free_ctx = NULL;
@@ -2540,6 +2628,44 @@ static struct ard_hp_adaptive_fu_ctx *ard_hp_get_adaptive_fu_ctx(uint32_t ssrc, 
   memset(free_ctx, 0, sizeof(*free_ctx));
   free_ctx->ssrc = ssrc;
   return free_ctx;
+}
+
+static void ard_hp_log_adaptive_first_failure_window(void) {
+  unsigned long i;
+  if (g_udp_media.first_failure_logged) return;
+  g_udp_media.first_failure_logged = 1;
+  rfbClientLog("ard-hp: first-failure telemetry hevc_types[t1=%lu t49=%lu t32=%lu t33=%lu t34=%lu] fu_types[f1=%lu f20=%lu start=%lu end=%lu] donl[pkts=%lu nonzero=%lu buffered=%lu emitted=%lu drop_old=%lu drop_ovf=%lu]\n",
+               g_video.hevc_nalu_type_counts[1],
+               g_video.hevc_nalu_type_counts[49],
+               g_video.hevc_nalu_type_counts[32],
+               g_video.hevc_nalu_type_counts[33],
+               g_video.hevc_nalu_type_counts[34],
+               g_video.hevc_fu_type_counts[1],
+               g_video.hevc_fu_type_counts[20],
+               g_video.hevc_fu_start_packets,
+               g_video.hevc_fu_end_packets,
+               g_video.hevc_donl_packets,
+               g_video.hevc_donl_nonzero,
+               g_video.hevc_donl_buffered,
+               g_video.hevc_donl_emitted,
+               g_video.hevc_donl_dropped_old,
+               g_video.hevc_donl_dropped_overflow);
+  for (i = 0; i < g_video.rtp_ssrc_track_count; ++i) {
+    const struct ard_hp_rtp_ssrc_track *t = &g_video.rtp_ssrc_tracks[i];
+    if (t->ssrc == 0 || t->seq_packets == 0) continue;
+    rfbClientLog("ard-hp: first-failure ssrc=0x%08x seq[pkts=%lu gap_ev=%lu gap_pkts=%lu reord=%lu dup=%lu] donl[pkts=%lu gap_ev=%lu gap_steps=%lu back=%lu dup=%lu]\n",
+                 (unsigned)t->ssrc,
+                 t->seq_packets,
+                 t->seq_gap_events,
+                 t->seq_gap_packets,
+                 t->seq_reorder_events,
+                 t->seq_duplicate_packets,
+                 t->donl_packets,
+                 t->donl_gap_events,
+                 t->donl_gap_steps,
+                 t->donl_backward_events,
+                 t->donl_duplicate_events);
+  }
 }
 
 static int ard_hp_rtp_au_append_bytes(const uint8_t *data, size_t data_len) {
@@ -2786,6 +2912,10 @@ static int ard_hp_try_extract_rtp_video_bytestream(const uint8_t *packet, size_t
   /* H.265 / HEVC payload formats (RFC 7798). */
   if (payload_len >= 2u) {
     uint8_t nalu_type = (uint8_t)((payload[0] >> 1) & 0x3f);
+    if (nalu_type < 64u) g_video.hevc_nalu_type_counts[nalu_type]++;
+    if (nalu_type != 49u) {
+      ard_hp_note_rtp_seq_donl(ssrc, seq, 0, 0);
+    }
     if (nalu_type <= 47u) {
       if (payload_len >= 4u && payload[1] == 0x01u) {
         if (!ard_hp_append_annexb_nal(&buf, &len, &cap, payload, 2u)) goto fail;
@@ -2856,10 +2986,12 @@ static int ard_hp_try_extract_rtp_video_bytestream(const uint8_t *packet, size_t
         uint8_t start;
         uint8_t end;
         uint8_t fu_type;
+        uint16_t donl = 0;
+        int has_donl = 0;
         uint8_t nal_hdr[2];
         struct ard_hp_adaptive_fu_ctx *fu_ctx;
         int seq_order;
-        uint16_t fu_gap_max = env_u16_or_default("VNC_ARD_HP_ADAPTIVE_FU_GAP_MAX", 32u);
+        uint16_t fu_gap_max = env_u16_or_default("VNC_ARD_HP_ADAPTIVE_FU_GAP_MAX", 128u);
         uint8_t *pending_frag = NULL;
         size_t pending_len = 0;
         int pending_end = 0;
@@ -2867,12 +2999,22 @@ static int ard_hp_try_extract_rtp_video_bytestream(const uint8_t *packet, size_t
         fu_header = payload[fu_header_off];
         start = (uint8_t)(fu_header & 0x80u);
         end = (uint8_t)(fu_header & 0x40u);
+        if (start) g_video.hevc_fu_start_packets++;
+        if (end) g_video.hevc_fu_end_packets++;
         fu_type = (uint8_t)(fu_header & 0x3fu);
+        if (fu_type < 64u) g_video.hevc_fu_type_counts[fu_type]++;
+        if (payload_len >= fu_header_off + 3u) {
+          has_donl = 1;
+          donl = read_be_u16(payload + fu_header_off + 1u);
+          g_video.hevc_donl_packets++;
+          if (donl != 0u) g_video.hevc_donl_nonzero++;
+        }
         if (fu_type == 0u) return 0;
-        fu_ctx = ard_hp_get_adaptive_fu_ctx(ssrc, start ? 1 : 0);
-        if (!fu_ctx) return 0;
+        fu_ctx = ard_hp_get_adaptive_fu_ctx(ssrc, 1);
+        ard_hp_note_rtp_seq_donl(ssrc, seq, has_donl, donl);
         nal_hdr[0] = (uint8_t)((payload[0] & 0x81u) | (fu_type << 1));
         nal_hdr[1] = payload[1];
+        if (!fu_ctx) return 0;
         if (start) {
           ard_hp_adaptive_fu_reset(fu_ctx, 1);
           fu_ctx->active = 1;
@@ -3337,6 +3479,12 @@ static int ard_hp_ensure_video_decoder(enum ard_hp_video_codec codec_kind) {
 
   g_video.codec_ctx = avcodec_alloc_context3(decoder);
   if (!g_video.codec_ctx) return 0;
+#ifdef AV_CODEC_FLAG_OUTPUT_CORRUPT
+  g_video.codec_ctx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+#endif
+#ifdef AV_CODEC_FLAG2_SHOW_ALL
+  g_video.codec_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
+#endif
   g_video.parser = av_parser_init(codec_id);
   ret = avcodec_open2(g_video.codec_ctx, decoder, NULL);
   if (ret < 0) {
@@ -3402,6 +3550,12 @@ static struct ard_hp_lane_decoder *ard_hp_get_or_create_lane_decoder(uint32_t ss
     ard_hp_release_lane_decoder(free_lane);
     return NULL;
   }
+#ifdef AV_CODEC_FLAG_OUTPUT_CORRUPT
+  free_lane->codec_ctx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+#endif
+#ifdef AV_CODEC_FLAG2_SHOW_ALL
+  free_lane->codec_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
+#endif
   if (avcodec_open2(free_lane->codec_ctx, decoder, NULL) < 0) {
     ard_hp_release_lane_decoder(free_lane);
     return NULL;
@@ -3593,6 +3747,7 @@ static int ard_hp_push_decoded_frame(rfbClient *client, AVFrame *frame,
   uint8_t *dst_data[4];
   int dst_linesize[4];
   int ret;
+  int adaptive_locked_fb;
   int src_w;
   int src_h;
   int dst_w;
@@ -3605,13 +3760,25 @@ static int ard_hp_push_decoded_frame(rfbClient *client, AVFrame *frame,
   src_h = frame->height;
   dst_w = client->width;
   dst_h = client->height;
+  adaptive_locked_fb = (g_runtime.ard_hp_mode &&
+                        env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE") &&
+                        g_hp.media_stream_message_type >= 2);
 
   if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return 0;
   if (adaptive_strip_mode && src_h < dst_h) {
     return ard_hp_push_decoded_strip_frame(client, frame, rtp_ssrc);
   }
 
-  if ((src_w != dst_w || src_h != dst_h) && (uint16_t)src_w != 0 && (uint16_t)src_h != 0) {
+  if (adaptive_locked_fb) {
+    uint16_t backing_w = ard_hp_backing_width(client);
+    uint16_t backing_h = ard_hp_backing_height(client);
+    if (backing_w > 0 && backing_h > 0 &&
+        ((uint16_t)dst_w != backing_w || (uint16_t)dst_h != backing_h)) {
+      if (!ard_hp_resize_framebuffer_if_needed(client, backing_w, backing_h)) return 0;
+      dst_w = client->width;
+      dst_h = client->height;
+    }
+  } else if ((src_w != dst_w || src_h != dst_h) && (uint16_t)src_w != 0 && (uint16_t)src_h != 0) {
     if (!ard_hp_resize_framebuffer_if_needed(client, (uint16_t)src_w, (uint16_t)src_h)) return 0;
     dst_w = client->width;
     dst_h = client->height;
@@ -4025,6 +4192,16 @@ static void ard_hp_shutdown_video_decoder(void) {
   memset(g_video.rtp_ssrc_tracks, 0, sizeof(g_video.rtp_ssrc_tracks));
   g_video.rtp_ssrc_track_count = 0;
   g_video.rtp_ssrc_overflow_packets = 0;
+  memset(g_video.hevc_nalu_type_counts, 0, sizeof(g_video.hevc_nalu_type_counts));
+  memset(g_video.hevc_fu_type_counts, 0, sizeof(g_video.hevc_fu_type_counts));
+  g_video.hevc_donl_packets = 0;
+  g_video.hevc_donl_nonzero = 0;
+  g_video.hevc_donl_buffered = 0;
+  g_video.hevc_donl_emitted = 0;
+  g_video.hevc_donl_dropped_old = 0;
+  g_video.hevc_donl_dropped_overflow = 0;
+  g_video.hevc_fu_start_packets = 0;
+  g_video.hevc_fu_end_packets = 0;
   if (g_video.packet) {
     av_packet_free(&g_video.packet);
   }
@@ -4157,14 +4334,18 @@ static void ard_hp_media_udp_shutdown(void) {
   g_udp_media.last_decoder_flush_ms = 0;
   g_udp_media.last_media_reinit_ms = 0;
   g_udp_media.last_rr_keepalive_ms = 0;
+  g_udp_media.last_source_failover_ms = 0;
   g_udp_media.refresh_retries = 0;
   g_udp_media.pli_requests_sent = 0;
   g_udp_media.rr_keepalives_sent = 0;
   g_udp_media.last_fu_drop_observed = 0;
+  g_udp_media.last_failover_fu_drop_observed = 0;
+  g_udp_media.source_failover_count = 0;
   g_udp_media.decoder_flushes = 0;
   g_udp_media.media_reinit_attempts = 0;
   g_udp_media.last_decoded_frames_observed = 0;
   g_udp_media.last_decode_progress_ms = 0;
+  g_udp_media.first_failure_logged = 0;
   g_udp_media.rtcp_sender_ssrc = 0;
   g_udp_media.rtcp_fir_seq = 0;
   g_hp.media_udp_started = 0;
@@ -4592,16 +4773,15 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
         pt = (uint8_t)(packet[1] & 0x7fu);
         if (pt == 100u && (size_t)nread >= 300u) {
           g_udp_media.video_socket_substantial_ms = monotonic_ms();
-          if (g_udp_media.video_source_socket != 1) {
+          if (g_udp_media.video_source_socket == 0) {
             g_udp_media.video_source_socket = 1;
-            rfbClientLog("ard-hp: observed substantial video RTP on configured video socket (pt=%u len=%lu)\n",
+            rfbClientLog("ard-hp: locked video RTP source to configured video socket (pt=%u len=%lu)\n",
                          (unsigned)pt, (unsigned long)nread);
           }
         }
       }
       decode_this = looks_like_video &&
-                    (size_t)nread >= min_video_rtp_len &&
-                    (g_udp_media.video_source_socket == 0 || g_udp_media.video_source_socket == 1);
+                    (size_t)nread >= min_video_rtp_len;
     if (decode_this) {
       g_udp_media.video_decode_attempts++;
       if (!ard_hp_decode_video_media_packet(client, 0x3ea, packet, (size_t)nread)) {
@@ -4634,16 +4814,15 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
         pt = (uint8_t)(packet[1] & 0x7fu);
         if (pt == 100u && (size_t)nread >= 300u) {
           g_udp_media.audio_socket_substantial_ms = monotonic_ms();
-          if (g_udp_media.video_source_socket != 2) {
+          if (g_udp_media.video_source_socket == 0) {
             g_udp_media.video_source_socket = 2;
-            rfbClientLog("ard-hp: observed substantial video RTP on configured audio socket (pt=%u len=%lu)\n",
+            rfbClientLog("ard-hp: locked video RTP source to configured audio socket (pt=%u len=%lu)\n",
                          (unsigned)pt, (unsigned long)nread);
           }
         }
       }
       decode_this = looks_like_video &&
-                    (size_t)nread >= min_video_rtp_len &&
-                    (g_udp_media.video_source_socket == 0 || g_udp_media.video_source_socket == 2);
+                    (size_t)nread >= min_video_rtp_len;
       if (decode_this) {
         /* Some adaptive sessions place video RTP on stage1+1 while stage1 port is control/timing/RTCP. */
         g_udp_media.video_decode_attempts++;
@@ -4656,24 +4835,15 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
     }
   }
 
-  if (g_udp_media.video_source_socket == 2 &&
-      g_udp_media.video_socket_substantial_ms > 0 &&
-      (g_udp_media.audio_socket_substantial_ms == 0 ||
-       g_udp_media.video_socket_substantial_ms - g_udp_media.audio_socket_substantial_ms >= 1000)) {
-    g_udp_media.video_source_socket = 1;
-    rfbClientLog("ard-hp: switched RTP decode source to video socket after sustained activity\n");
-  } else if (g_udp_media.video_source_socket == 1 &&
-             g_udp_media.audio_socket_substantial_ms > 0 &&
-             (g_udp_media.video_socket_substantial_ms == 0 ||
-              g_udp_media.audio_socket_substantial_ms - g_udp_media.video_socket_substantial_ms >= 1000)) {
-    g_udp_media.video_source_socket = 2;
-    rfbClientLog("ard-hp: switched RTP decode source to audio socket after sustained activity\n");
-  }
-
   if (g_udp_media.video_packets_rx > 0 || g_udp_media.audio_packets_rx > 0) {
     long long now_ms;
+    int source_failover_enabled = 0;
     int keyframe_recovery_needed = 0;
     const char *keyframe_recovery_reason = "decode-stall";
+    int stall_flush_enabled = 1;
+    int stall_full_refresh_enabled = 1;
+    const char *stall_flush_env = ard_hp_getenv_compat("VNC_ARD_HP_STALL_DECODER_FLUSH");
+    const char *stall_full_refresh_env = ard_hp_getenv_compat("VNC_ARD_HP_STALL_FULL_REFRESH");
     unsigned long srtp_ok = 0;
     unsigned long srtp_fail = 0;
     unsigned long srtcp_ok = 0;
@@ -4713,6 +4883,12 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
     strip_ssrc = g_video.strip_last_ssrc;
 #endif
     now_ms = monotonic_ms();
+    if (stall_flush_env && !env_flag_enabled("VNC_ARD_HP_STALL_DECODER_FLUSH")) {
+      stall_flush_enabled = 0;
+    }
+    if (stall_full_refresh_env && !env_flag_enabled("VNC_ARD_HP_STALL_FULL_REFRESH")) {
+      stall_full_refresh_enabled = 0;
+    }
     if (now_ms > 0) {
       if (video_decoded_frames > g_udp_media.last_decoded_frames_observed) {
         g_udp_media.last_decoded_frames_observed = video_decoded_frames;
@@ -4739,6 +4915,48 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
       g_udp_media.last_fu_drop_observed = fu_drop;
       keyframe_recovery_needed = 1;
       keyframe_recovery_reason = "fu-drop";
+      if (stall_flush_enabled &&
+          now_ms > 0 &&
+          (g_udp_media.last_decoder_flush_ms == 0 ||
+           now_ms - g_udp_media.last_decoder_flush_ms >= 500)) {
+        ard_hp_flush_video_decoder_state();
+        g_udp_media.last_decoder_flush_ms = now_ms;
+        g_udp_media.decoder_flushes++;
+        rfbClientLog("ard-hp: flushed video decoder state for fu-drop recovery count=%lu\n",
+                     g_udp_media.decoder_flushes);
+      }
+    }
+    if (source_failover_enabled &&
+        now_ms > 0 &&
+        g_udp_media.video_source_socket != 0 &&
+        g_udp_media.video_decode_attempts >= 512u &&
+        g_udp_media.last_decode_progress_ms > 0 &&
+        now_ms - g_udp_media.last_decode_progress_ms >= 1500 &&
+        fu_drop > g_udp_media.last_failover_fu_drop_observed &&
+        (g_udp_media.last_source_failover_ms == 0 ||
+         now_ms - g_udp_media.last_source_failover_ms >= 3000)) {
+      int old_source = g_udp_media.video_source_socket;
+      int new_source = (old_source == 1) ? 2 : 1;
+      g_udp_media.video_source_socket = new_source;
+      if (new_source == 1) {
+        g_udp_media.video_socket_substantial_ms = now_ms;
+        g_udp_media.audio_socket_substantial_ms = 0;
+      } else {
+        g_udp_media.audio_socket_substantial_ms = now_ms;
+        g_udp_media.video_socket_substantial_ms = 0;
+      }
+      g_udp_media.last_source_failover_ms = now_ms;
+      g_udp_media.last_failover_fu_drop_observed = fu_drop;
+      g_udp_media.source_failover_count++;
+      ard_hp_flush_video_decoder_state();
+      g_udp_media.last_decoder_flush_ms = now_ms;
+      g_udp_media.decoder_flushes++;
+      keyframe_recovery_needed = 1;
+      keyframe_recovery_reason = "source-failover";
+      rfbClientLog("ard-hp: source failover %d->%d stall_ms=%lld fu_drop=%lu failovers=%lu\n",
+                   old_source, new_source,
+                   (long long)(now_ms - g_udp_media.last_decode_progress_ms),
+                   fu_drop, g_udp_media.source_failover_count);
     }
     if (now_ms > 0 &&
         g_udp_media.video_decode_attempts > 0 &&
@@ -4781,8 +4999,9 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
           strip_ssrc != 0u) {
         ard_hp_lock_rtp_video_ssrc(strip_ssrc, "decode-stall-fallback");
       }
-      if (g_udp_media.last_decoder_flush_ms == 0 ||
-          now_ms - g_udp_media.last_decoder_flush_ms >= 1000) {
+      if (stall_flush_enabled &&
+          (g_udp_media.last_decoder_flush_ms == 0 ||
+           now_ms - g_udp_media.last_decoder_flush_ms >= 1000)) {
         ard_hp_flush_video_decoder_state();
         g_udp_media.last_decoder_flush_ms = now_ms;
         g_udp_media.decoder_flushes++;
@@ -4812,6 +5031,11 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
         g_udp_media.video_decode_attempts >= 128u &&
         keyframe_recovery_needed &&
         (g_udp_media.last_pli_ms == 0 || now_ms - g_udp_media.last_pli_ms >= 1000)) {
+      if ((strcmp(keyframe_recovery_reason, "decode-stall") == 0 ||
+           strcmp(keyframe_recovery_reason, "fu-drop") == 0) &&
+          !g_udp_media.first_failure_logged) {
+        ard_hp_log_adaptive_first_failure_window();
+      }
       unsigned long pli_sent = ard_hp_media_udp_send_keyframe_requests();
       if (pli_sent > 0) {
         g_udp_media.last_pli_ms = now_ms;
@@ -4820,7 +5044,7 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
                      pli_sent, g_udp_media.pli_requests_sent, keyframe_recovery_reason);
       }
     }
-    if (env_flag_enabled("VNC_ARD_HP_STALL_FULL_REFRESH") &&
+    if (stall_full_refresh_enabled &&
         now_ms > 0 &&
         strcmp(keyframe_recovery_reason, "decode-stall") == 0 &&
         (g_udp_media.last_refresh_retry_ms == 0 || now_ms - g_udp_media.last_refresh_retry_ms >= 2000)) {
@@ -4841,7 +5065,7 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
     }
     if (now_ms > 0 && (g_udp_media.last_stats_log_ms == 0 || now_ms - g_udp_media.last_stats_log_ms >= 2000)) {
       g_udp_media.last_stats_log_ms = now_ms;
-      rfbClientLog("ard-hp: udp media stats video_rx=%lu(len=%lu..%lu) audio_rx=%lu(len=%lu..%lu) decode_attempts=%lu decode_failures=%lu srtp_ok=%lu srtp_fail=%lu srtcp_ok=%lu srtcp_fail=%lu rr_sent=%lu fu_ok=%lu fu_drop=%lu au_ok=%lu au_drop=%lu dec_pkts=%lu dec_frames=%lu strip_frames=%lu strip_lanes=%lu strip_last_ssrc=0x%08x ssrc_sel=0x%08x sel_pkts=%lu ssrc_drop=%lu ssrc_tracks=%lu ssrc_overflow=%lu\n",
+      rfbClientLog("ard-hp: udp media stats video_rx=%lu(len=%lu..%lu) audio_rx=%lu(len=%lu..%lu) decode_attempts=%lu decode_failures=%lu srtp_ok=%lu srtp_fail=%lu srtcp_ok=%lu srtcp_fail=%lu rr_sent=%lu fu_ok=%lu fu_drop=%lu au_ok=%lu au_drop=%lu dec_pkts=%lu dec_frames=%lu strip_frames=%lu strip_lanes=%lu strip_last_ssrc=0x%08x ssrc_sel=0x%08x sel_pkts=%lu ssrc_drop=%lu ssrc_tracks=%lu ssrc_overflow=%lu src_socket=%d failovers=%lu\n",
                    g_udp_media.video_packets_rx,
                    (unsigned long)g_udp_media.video_min_len,
                    (unsigned long)g_udp_media.video_max_len,
@@ -4868,7 +5092,9 @@ static int ard_hp_media_udp_pump(rfbClient *client) {
                    selected_packets,
                    dropped_other_ssrc,
                    ssrc_tracks,
-                   ssrc_overflow);
+                   ssrc_overflow,
+                   g_udp_media.video_source_socket,
+                   g_udp_media.source_failover_count);
     }
   }
   return 1;
@@ -6033,7 +6259,7 @@ static int live_view_should_drive_dynamic_resize(void) {
   Uint32 window_flags = 0;
 
   if (!g_runtime.live_view || !g_live.window) return 0;
-  if (ard_hp_nonhidpi_enabled()) return 0;
+  if (!ard_hp_dynamic_resize_enabled()) return 0;
   window_flags = SDL_GetWindowFlags(g_live.window);
   if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 ||
       (window_flags & SDL_WINDOW_FULLSCREEN) != 0) {
@@ -6128,6 +6354,7 @@ static int maybe_observe_dynamic_resolution_target(rfbClient *client, const char
   uint16_t display_h = 0;
 
   if (!client || !g_runtime.live_view || !g_runtime.ard_hp_mode) return 1;
+  if (!ard_hp_dynamic_resize_enabled()) return 1;
   if (ard_hp_display_width(client) == 0 || ard_hp_display_height(client) == 0) return 1;
   if (!ard_hp_compute_dynamic_resolution_target(client, &target_w, &target_h)) return 1;
   if (target_w == 0 || target_h == 0) return 1;
@@ -6164,7 +6391,7 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
   if (env_flag_enabled("VNC_ARD_HP_ADAPTIVE_MODE") && g_hp.media_stream_message_type < 2) {
     return 1;
   }
-  if (ard_hp_nonhidpi_enabled()) {
+  if (!ard_hp_dynamic_resize_enabled()) {
     g_live.pending_dynamic_resize = 0;
     g_live.runtime_size_valid = 0;
     g_live.debounce_runtime_w = 0;
@@ -7003,7 +7230,7 @@ static rfbBool alloc_live_fb(rfbClient *client) {
 }
 
 static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
-  int allow_dynamic_resize = ard_hp_hidpi_enabled();
+  int allow_dynamic_resize = ard_hp_dynamic_resize_enabled();
 
   switch (e->type) {
     case SDL_WINDOWEVENT:
