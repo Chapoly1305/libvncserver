@@ -101,6 +101,53 @@ rfbARDHPSRTPContext *rfbClientARDHPSRTPCreateInboundSuite5(const uint8_t *key_ma
 #endif
 }
 
+rfbARDHPSRTPContext *rfbClientARDHPSRTPCreateOutboundSuite5(const uint8_t *key_material,
+                                                            size_t key_len,
+                                                            rfbBool short_auth_tag) {
+#if defined(LIBVNCSERVER_HAVE_SRTP2)
+  rfbARDHPSRTPContext *ctx = NULL;
+  srtp_policy_t policy;
+  srtp_err_status_t st;
+
+  if (!key_material || key_len != ARD_HP_MEDIA_STREAM_OPTIONS_KEY_LEN) return NULL;
+  if (!ardhp_srtp_init_once()) return NULL;
+
+  ctx = (rfbARDHPSRTPContext *)calloc(1, sizeof(*ctx));
+  if (!ctx) return NULL;
+  memcpy(ctx->key, key_material, ARD_HP_MEDIA_STREAM_OPTIONS_KEY_LEN);
+  ctx->short_auth_tag = short_auth_tag ? 1 : 0;
+
+  memset(&policy, 0, sizeof(policy));
+  if (ctx->short_auth_tag) {
+    srtp_crypto_policy_set_aes_cm_256_hmac_sha1_32(&policy.rtp);
+    srtp_crypto_policy_set_aes_cm_256_hmac_sha1_32(&policy.rtcp);
+  } else {
+    srtp_crypto_policy_set_aes_cm_256_hmac_sha1_80(&policy.rtp);
+    srtp_crypto_policy_set_aes_cm_256_hmac_sha1_80(&policy.rtcp);
+  }
+  policy.ssrc.type = ssrc_any_outbound;
+  policy.ssrc.value = 0;
+  policy.key = ctx->key;
+  policy.window_size = 128;
+  policy.allow_repeat_tx = 1;
+  policy.next = NULL;
+
+  st = srtp_create(&ctx->session, &policy);
+  if (st != srtp_err_status_ok) {
+    rfbClientErr("ard-hp: libsrtp create outbound failed status=%d (suite5 short_tag=%d)\n",
+                 (int)st, ctx->short_auth_tag);
+    free(ctx);
+    return NULL;
+  }
+  return ctx;
+#else
+  (void)key_material;
+  (void)key_len;
+  (void)short_auth_tag;
+  return NULL;
+#endif
+}
+
 void rfbClientARDHPSRTPDestroy(rfbARDHPSRTPContext *ctx) {
 #if defined(LIBVNCSERVER_HAVE_SRTP2)
   if (!ctx) return;
@@ -141,6 +188,52 @@ rfbBool rfbClientARDHPSRTPUnprotectPacket(rfbARDHPSRTPContext *ctx,
 #else
   memcpy(buf, packet, packet_len);
   st = srtp_unprotect(ctx->session, buf, &packet_len_i);
+#endif
+  if (st != srtp_err_status_ok || packet_len_i <= 0) {
+    free(buf);
+    return FALSE;
+  }
+  *out_packet = buf;
+  *out_len = (size_t)packet_len_i;
+  return TRUE;
+#else
+  (void)ctx;
+  (void)packet;
+  (void)packet_len;
+  (void)out_packet;
+  (void)out_len;
+  return FALSE;
+#endif
+}
+
+rfbBool rfbClientARDHPSRTPProtectRTCPPacket(rfbARDHPSRTPContext *ctx,
+                                            const uint8_t *packet,
+                                            size_t packet_len,
+                                            uint8_t **out_packet,
+                                            size_t *out_len) {
+#if defined(LIBVNCSERVER_HAVE_SRTP2)
+  uint8_t *buf = NULL;
+  size_t cap = 0;
+  int packet_len_i;
+  size_t packet_len_z = 0;
+  srtp_err_status_t st;
+
+  if (out_packet) *out_packet = NULL;
+  if (out_len) *out_len = 0;
+  if (!ctx || !ctx->session || !packet || packet_len == 0 || !out_packet || !out_len) return FALSE;
+  if (packet_len > (size_t)INT_MAX) return FALSE;
+
+  cap = packet_len + 80u;
+  buf = (uint8_t *)malloc(cap);
+  if (!buf) return FALSE;
+  packet_len_i = (int)packet_len;
+#if defined(LIBVNCSERVER_HAVE_SRTP3_API)
+  packet_len_z = cap;
+  st = srtp_protect_rtcp(ctx->session, packet, packet_len, buf, &packet_len_z, 0);
+  packet_len_i = (int)packet_len_z;
+#else
+  memcpy(buf, packet, packet_len);
+  st = srtp_protect_rtcp(ctx->session, buf, &packet_len_i);
 #endif
   if (st != srtp_err_status_ok || packet_len_i <= 0) {
     free(buf);

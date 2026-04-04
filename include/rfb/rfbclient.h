@@ -603,12 +603,20 @@ extern rfbBool rfbClientARDHPExtractVideoBytestream(uint32_t encoding,
 extern rfbARDHPSRTPContext *rfbClientARDHPSRTPCreateInboundSuite5(const uint8_t *key_material,
                                                                    size_t key_len,
                                                                    rfbBool short_auth_tag);
+extern rfbARDHPSRTPContext *rfbClientARDHPSRTPCreateOutboundSuite5(const uint8_t *key_material,
+                                                                    size_t key_len,
+                                                                    rfbBool short_auth_tag);
 extern void rfbClientARDHPSRTPDestroy(rfbARDHPSRTPContext *ctx);
 extern rfbBool rfbClientARDHPSRTPUnprotectPacket(rfbARDHPSRTPContext *ctx,
                                                  const uint8_t *packet,
                                                  size_t packet_len,
                                                  uint8_t **out_packet,
                                                  size_t *out_len);
+extern rfbBool rfbClientARDHPSRTPProtectRTCPPacket(rfbARDHPSRTPContext *ctx,
+                                                   const uint8_t *packet,
+                                                   size_t packet_len,
+                                                   uint8_t **out_packet,
+                                                   size_t *out_len);
 extern rfbBool rfbClientARDHPSendScaleFactor(rfbClient *client, double scale);
 extern rfbBool rfbClientARDHPSendAutoFramebufferUpdate(rfbClient *client,
                                                          uint16_t width, uint16_t height);
