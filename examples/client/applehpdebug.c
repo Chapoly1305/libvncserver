@@ -3245,22 +3245,6 @@ static int apple_hp_maybe_request_pending_region_refresh(rfbClient *client) {
   return apple_hp_request_full_refresh_now(client, w, h, "AppleDisplayLayout");
 }
 
-static void on_cut_text(rfbClient *client, const char *text, int textlen) {
-  (void)client;
-  (void)text;
-  (void)textlen;
-}
-
-static void on_cursor_shape(rfbClient *client, int xhot, int yhot, int width,
-                            int height, int bytesPerPixel) {
-  (void)client;
-  (void)xhot;
-  (void)yhot;
-  (void)width;
-  (void)height;
-  (void)bytesPerPixel;
-}
-
 int main(int argc, char **argv) {
   rfbClient *client;
   time_t start;
@@ -3307,8 +3291,6 @@ int main(int argc, char **argv) {
   client->canHandleNewFBSize = TRUE;
   client->GotFrameBufferUpdate = on_fb_update;
   client->FinishedFrameBufferUpdate = on_fb_update_done;
-  client->GotXCutText = on_cut_text;
-  client->GotCursorShape = on_cursor_shape;
   client->GetCredential = get_credential;
   rfbClientRegisterExtension(&kHighPerfProbeExt);
   if (!configure_apple_hp_mode(client)) return 1;
