@@ -61,6 +61,7 @@ struct apple_hp_frame_stats {
 struct apple_hp_runtime_options {
   int live_view;
   int live_view_vsync;
+  int live_view_overlay;
   int low_latency_input;
   int log_input;
   int apple_hp_mode;
@@ -3237,9 +3238,14 @@ int main(int argc, char **argv) {
   signal(SIGINT, on_sigint);
   g_runtime.live_view = env_flag_enabled("VNC_LIVE_VIEW");
   g_runtime.live_view_vsync = env_flag_enabled("VNC_LIVE_VIEW_VSYNC");
+#if APPLEHPDEBUG_DEBUG_BUILD
+  g_runtime.live_view_overlay = env_flag_default_true("VNC_LIVE_VIEW_OVERLAY");
+#else
+  g_runtime.live_view_overlay = env_flag_enabled("VNC_LIVE_VIEW_OVERLAY");
+#endif
   g_runtime.low_latency_input = env_flag_default_true("VNC_LIVE_VIEW_LOW_LATENCY_INPUT");
   g_runtime.log_input = env_flag_enabled("VNC_LOG_INPUT");
-  g_runtime.apple_hp_mode = env_flag_enabled("VNC_APPLE_HP");
+  g_runtime.apple_hp_mode = env_flag_default_true("VNC_APPLE_HP");
 
 #if defined(APPLEHPDEBUG_HAS_SDL)
   if (g_runtime.live_view) {
