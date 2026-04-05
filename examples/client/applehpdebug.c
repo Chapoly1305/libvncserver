@@ -1914,6 +1914,8 @@ static int maybe_send_dynamic_resolution_update(rfbClient *client, const char *r
 
 static int apple_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
   long long elapsed_ms = 0;
+  uint16_t timed_out_w = 0;
+  uint16_t timed_out_h = 0;
 
   if (!client || !g_hp.dynamic_request_in_flight) return 1;
   if (g_hp.dynamic_request_started_ms <= 0) return 1;
@@ -1924,16 +1926,26 @@ static int apple_hp_maybe_handle_dynamic_request_timeout(rfbClient *client) {
                (unsigned)g_hp.last_dynamic_request_w,
                (unsigned)g_hp.last_dynamic_request_h,
                elapsed_ms);
-  apple_hp_clear_dynamic_request_state(TRUE);
+  timed_out_w = g_hp.last_dynamic_request_w;
+  timed_out_h = g_hp.last_dynamic_request_h;
+  /* Keep last_dynamic_request_{w,h} so we do not immediately spam the same
+   * unsupported target again on the next idle tick. A new user resize that
+   * changes target dimensions will still trigger a fresh request. */
+  apple_hp_clear_dynamic_request_state(FALSE);
   if (g_hp.pending_dynamic_target_w != 0 && g_hp.pending_dynamic_target_h != 0) {
     uint16_t pending_w = g_hp.pending_dynamic_target_w;
     uint16_t pending_h = g_hp.pending_dynamic_target_h;
+    if (pending_w == timed_out_w && pending_h == timed_out_h) {
+      apple_hp_clear_pending_dynamic_target();
+      return 1;
+    }
     apple_hp_clear_pending_dynamic_target();
     g_live.last_runtime_w = pending_w;
     g_live.last_runtime_h = pending_h;
     return maybe_send_dynamic_resolution_update(client, "dynamic-timeout", TRUE);
   }
-  g_live.pending_dynamic_resize = 1;
+  g_live.last_runtime_w = timed_out_w;
+  g_live.last_runtime_h = timed_out_h;
   return 1;
 }
 
