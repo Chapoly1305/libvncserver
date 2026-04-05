@@ -2711,22 +2711,27 @@ static rfbBool handle_live_view_event(rfbClient *client, SDL_Event *e) {
         case SDL_WINDOWEVENT_SIZE_CHANGED:
         case SDL_WINDOWEVENT_MAXIMIZED:
         case SDL_WINDOWEVENT_RESTORED:
-        case SDL_WINDOWEVENT_SHOWN:
+        case SDL_WINDOWEVENT_SHOWN: {
+          int synthetic = 0;
+          if (g_live.synthetic_resize_events > 0) {
+            synthetic = 1;
+            g_live.synthetic_resize_events--;
+          } else if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
+            /* Mark user-driven size changes before layout refresh so we do
+             * not immediately snap the window back to the auto target size. */
+            g_live.window_user_sized = 1;
+          }
           invalidate_live_view_runtime_size();
           refresh_live_view_layout(client);
           redraw_live_view(client);
-          if (g_live.synthetic_resize_events > 0) {
-            g_live.synthetic_resize_events--;
-          } else {
-            if (e->window.event != SDL_WINDOWEVENT_SHOWN) {
-              g_live.window_user_sized = 1;
-            }
+          if (!synthetic) {
             g_live.pending_dynamic_resize = 1;
           }
           SendFramebufferUpdateRequest(client, 0, 0,
                                        apple_hp_request_width(client),
                                        apple_hp_request_height(client), FALSE);
           break;
+        }
         case SDL_WINDOWEVENT_FOCUS_LOST:
           if (g_live.right_alt_key_down) {
             SendKeyEvent(client, XK_Alt_R, FALSE);
