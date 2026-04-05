@@ -192,6 +192,10 @@ struct apple_hp_live_view_state {
   int crop_w;
   int crop_h;
   int skip_next_fb_update;
+  double overlay_fps;
+  unsigned long long overlay_prev_frames;
+  long long overlay_prev_ms;
+  long long overlay_title_last_ms;
 };
 
 static struct apple_hp_live_view_state g_live = {.needs_clear = 1};
@@ -2417,20 +2421,20 @@ static void render_live_cursor(rfbClient *client) {
   if (!client || !g_live.renderer) return;
 
 #if APPLEHPDEBUG_DEBUG_BUILD
-  SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
-  SDL_SetRenderDrawColor(g_live.renderer, 255, 64, 64, 220);
-  bar.x = g_live.pointer_draw_x - 8;
-  bar.y = g_live.pointer_draw_y;
-  bar.w = 17;
-  bar.h = 1;
-  SDL_RenderFillRect(g_live.renderer, &bar);
-  bar.x = g_live.pointer_draw_x;
-  bar.y = g_live.pointer_draw_y - 8;
-  bar.w = 1;
-  bar.h = 17;
-  SDL_RenderFillRect(g_live.renderer, &bar);
-#else
-  (void)bar;
+  if (g_runtime.live_view_overlay) {
+    SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(g_live.renderer, 255, 64, 64, 220);
+    bar.x = g_live.pointer_draw_x - 8;
+    bar.y = g_live.pointer_draw_y;
+    bar.w = 17;
+    bar.h = 1;
+    SDL_RenderFillRect(g_live.renderer, &bar);
+    bar.x = g_live.pointer_draw_x;
+    bar.y = g_live.pointer_draw_y - 8;
+    bar.w = 1;
+    bar.h = 17;
+    SDL_RenderFillRect(g_live.renderer, &bar);
+  }
 #endif
 
   if (!g_live.cursor_visible || g_live.cursor_current_cache_id == 0) return;
@@ -2458,6 +2462,80 @@ static void render_live_cursor(rfbClient *client) {
 #endif
 }
 
+static void render_live_overlay(rfbClient *client,
+                                const struct apple_hp_live_view_geometry *geom) {
+#if defined(APPLEHPDEBUG_HAS_SDL) && APPLEHPDEBUG_DEBUG_BUILD
+  SDL_Rect input_rect;
+  SDL_Rect control_rect;
+  long long now_ms = 0;
+  long long elapsed_ms = 0;
+  unsigned long long delta_frames = 0;
+  const char *base_title = NULL;
+  char title[256];
+
+  if (!client || !geom || !geom->valid || !g_live.renderer || !g_live.window) return;
+  if (!g_runtime.live_view || !g_runtime.live_view_overlay) return;
+
+  input_rect = geom->dst;
+  apple_hp_control_rect_for_geometry(client, geom, &control_rect);
+
+  if (input_rect.w > 0 && input_rect.h > 0) {
+    SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(g_live.renderer, 72, 140, 255, 220);
+    SDL_RenderDrawRect(g_live.renderer, &input_rect);
+  }
+
+  if (control_rect.w > 0 && control_rect.h > 0) {
+    if (control_rect.x == input_rect.x &&
+        control_rect.y == input_rect.y &&
+        control_rect.w == input_rect.w &&
+        control_rect.h == input_rect.h &&
+        control_rect.w > 4 && control_rect.h > 4) {
+      control_rect.x += 2;
+      control_rect.y += 2;
+      control_rect.w -= 4;
+      control_rect.h -= 4;
+    }
+    SDL_SetRenderDrawBlendMode(g_live.renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(g_live.renderer, 48, 224, 96, 220);
+    SDL_RenderDrawRect(g_live.renderer, &control_rect);
+  }
+
+  now_ms = monotonic_ms();
+  if (now_ms <= 0) return;
+  if (g_live.overlay_prev_ms <= 0) {
+    g_live.overlay_prev_ms = now_ms;
+    g_live.overlay_prev_frames = g_frame.frames;
+  }
+
+  elapsed_ms = now_ms - g_live.overlay_prev_ms;
+  if (elapsed_ms >= 400) {
+    delta_frames = g_frame.frames - g_live.overlay_prev_frames;
+    g_live.overlay_fps = ((double)delta_frames * 1000.0) / (double)elapsed_ms;
+    g_live.overlay_prev_ms = now_ms;
+    g_live.overlay_prev_frames = g_frame.frames;
+  }
+
+  if (g_live.overlay_title_last_ms > 0 && (now_ms - g_live.overlay_title_last_ms) < 300) return;
+  g_live.overlay_title_last_ms = now_ms;
+
+  base_title = (client->desktopName && *client->desktopName) ? client->desktopName : "applehpdebug";
+  snprintf(title, sizeof(title),
+           "%s | FPS %.1f | rects %llu | display %ux%u | backing %ux%u",
+           base_title,
+           g_live.overlay_fps,
+           (unsigned long long)g_frame.rects,
+           (unsigned)apple_hp_display_width(client),
+           (unsigned)apple_hp_display_height(client),
+           (unsigned)apple_hp_backing_width(client),
+           (unsigned)apple_hp_backing_height(client));
+  SDL_SetWindowTitle(g_live.window, title);
+#else
+  (void)client;
+  (void)geom;
+#endif
+}
+
 static void redraw_live_view(rfbClient *client) {
 #if defined(APPLEHPDEBUG_HAS_SDL)
   struct apple_hp_live_view_geometry geom;
@@ -2468,6 +2546,7 @@ static void redraw_live_view(rfbClient *client) {
   SDL_SetRenderDrawColor(g_live.renderer, 0, 0, 0, 255);
   if (SDL_RenderClear(g_live.renderer) < 0) return;
   if (SDL_RenderCopy(g_live.renderer, g_live.texture, &geom.src, &geom.dst) < 0) return;
+  render_live_overlay(client, &geom);
   render_live_cursor(client);
   SDL_RenderPresent(g_live.renderer);
 #else
@@ -2780,6 +2859,7 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
     rfbClientErr("live-view: SDL_RenderCopy failed: %s\n", SDL_GetError());
     return;
   }
+  render_live_overlay(client, &geom);
   render_live_cursor(client);
   SDL_RenderPresent(g_live.renderer);
   g_live.last_present_us = monotonic_us();
