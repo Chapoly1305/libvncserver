@@ -1735,7 +1735,6 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   int display_index = 0;
   int w = 0;
   int h = 0;
-  Uint32 window_flags = 0;
   SDL_Rect bounds;
 
   if (!client || !out_w || !out_h) return 0;
@@ -1748,27 +1747,20 @@ static int live_view_runtime_display_size(rfbClient *client, uint16_t *out_w, ui
   }
   memset(&bounds, 0, sizeof(bounds));
   if (g_live.window) {
-    window_flags = SDL_GetWindowFlags(g_live.window);
     display_index = SDL_GetWindowDisplayIndex(g_live.window);
     if (display_index < 0) display_index = 0;
   }
-  if ((window_flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0 ||
-      (window_flags & SDL_WINDOW_FULLSCREEN) != 0) {
-    /* Dynamic-resolution requests should follow the logical window/display
-     * size in points, not the HiDPI drawable size in pixels. Using drawable
-     * pixels here makes the remote desktop too dense, which shrinks icons/text.
-     * For fullscreen, prefer full display bounds instead of usable bounds so
-     * we do not under-request height and create local letterboxing. */
-    if (SDL_GetDisplayBounds(display_index, &bounds) == 0 &&
-        bounds.w > 0 && bounds.h > 0) {
-      w = bounds.w;
-      h = bounds.h;
-    }
-  }
+  /* Dynamic-resolution requests should follow logical window size (points),
+   * not HiDPI drawable pixels, otherwise Retina fullscreen can over-request
+   * and trigger blurry/undersized fallback resolutions on some ARD servers. */
   if (g_live.window) SDL_GetWindowSize(g_live.window, &window_w, &window_h);
-  if (w <= 0 || h <= 0) {
-    w = window_w;
-    h = window_h;
+  w = window_w;
+  h = window_h;
+  if ((w <= 0 || h <= 0) &&
+      SDL_GetDisplayBounds(display_index, &bounds) == 0 &&
+      bounds.w > 0 && bounds.h > 0) {
+    w = bounds.w;
+    h = bounds.h;
   }
   if (w <= 0 || h <= 0) {
     live_view_target_size(client, &w, &h);
