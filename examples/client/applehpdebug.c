@@ -2812,19 +2812,6 @@ static void present_live_view(rfbClient *client, int x, int y, int w, int h) {
 
 static int kHighPerfProbeEncodings[] = {0x44f, 0x450, 0x451, 0x453, 0x455, 0x456, 0x3f2, 0};
 
-static const char *apple_hp_rect_encoding_name(int32_t encoding) {
-  switch (encoding) {
-    case 0x3f2: return "RFBMediaStream";
-    case 0x450: return "CursorImage";
-    case 0x44f: return "EncodeEncryptionInfo";
-    case 0x451: return "AppleDisplayLayout";
-    case 0x453: return "VendorKeysymEncoding";
-    case 0x455: return "KeyboardInputSource";
-    case 0x456: return "DeviceInfo";
-    default: return "Unknown";
-  }
-}
-
 static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateRectHeader *rect) {
   g_live.skip_next_fb_update = 1;
   uint8_t buf[36];
@@ -2845,9 +2832,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   uint8_t next_key[16];
   uint8_t next_iv[16];
   uint16_t payload_len;
-  uint16_t media_msg_version;
   size_t total_len;
-  char label[96];
 
   if (!client || !rect) return FALSE;
   if ((uint32_t)rect->encoding == 0x44f) {
@@ -2883,8 +2868,6 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     if (!ReadFromRFBServer(client, (char *)cursor_hdr, sizeof(cursor_hdr))) return FALSE;
     cursor_cache_id = read_be_u32(cursor_hdr);
     cursor_zlib_len = read_be_u32(cursor_hdr + 4);
-    snprintf(label, sizeof(label), "apple-hp rect 0x450 CursorImage cache=%u zlib=%u",
-             cursor_cache_id, cursor_zlib_len);
     if (cursor_zlib_len != 0) {
       if (cursor_zlib_len > (16U * 1024U * 1024U)) {
         rfbClientErr("apple-hp: refusing oversized cursor payload %u for cache=%u\n",
@@ -2897,8 +2880,6 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
         free(payload);
         return FALSE;
       }
-      snprintf(label, sizeof(label), "apple-hp rect 0x450 CursorImage payload cache=%u",
-               cursor_cache_id);
       apple_hp_store_cursor_image(client, cursor_cache_id, rect->r.x, rect->r.y,
                                   rect->r.w, rect->r.h, payload, cursor_zlib_len);
       free(payload);
@@ -2927,12 +2908,6 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   if (payload_len != 0 && !ReadFromRFBServer(client, (char *)(payload + sizeof(hdr)), payload_len)) {
     free(payload);
     return FALSE;
-  }
-  snprintf(label, sizeof(label), "apple-hp rect 0x%03x %s",
-           (unsigned)rect->encoding, apple_hp_rect_encoding_name(rect->encoding));
-  if ((uint32_t)rect->encoding == 0x3f2 && total_len >= 4) {
-    media_msg_version = read_be_u16(payload + 2);
-    (void)media_msg_version;
   }
   if ((uint32_t)rect->encoding == 0x451 && total_len >= 12) {
     int first_display_layout = !g_hp.displayinfo2_seen;
