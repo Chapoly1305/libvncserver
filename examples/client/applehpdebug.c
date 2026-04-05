@@ -511,30 +511,6 @@ static int apple_hp_scale_coord_round(int pos, int src_extent, int dst_extent) {
   return (int)(num / (long long)dst_max);
 }
 
-static int hex_nibble(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-  return -1;
-}
-
-static size_t parse_hex_blob(const char *hex, uint8_t *out, size_t out_cap) {
-  size_t n = 0;
-  int hi = -1;
-  for (; *hex; ++hex) {
-    int v = hex_nibble(*hex);
-    if (v < 0) continue;
-    if (hi < 0) {
-      hi = v;
-      continue;
-    }
-    if (n >= out_cap) return 0;
-    out[n++] = (uint8_t)((hi << 4) | v);
-    hi = -1;
-  }
-  return (hi < 0) ? n : 0;
-}
-
 static uint16_t read_be_u16(const uint8_t *p) {
   return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
