@@ -1309,6 +1309,20 @@ static int apple_hp_send_post_rekey_setup(rfbClient *client) {
   return 1;
 }
 
+static int apple_hp_maybe_advance_post_rekey_setup(rfbClient *client) {
+  if (!g_runtime.apple_hp_mode || !client) return 1;
+  if (g_hp.post_rekey_ready != 2 || g_hp.post_rekey_sent) return 1;
+
+  if (g_hp.post_rekey_phase == 0 && g_hp.post_rekey_server_records > 1)
+    return apple_hp_send_post_rekey_setup(client);
+  if (g_hp.post_rekey_phase == 1 && g_hp.post_rekey_server_records > 2)
+    return apple_hp_send_post_rekey_setup(client);
+  if (g_hp.post_rekey_phase != 2) return 1;
+  if (!apple_hp_send_post_rekey_setup(client)) return 0;
+  g_hp.post_rekey_ready = 0;
+  return 1;
+}
+
 #if defined(APPLEHPDEBUG_HAS_SDL)
 struct sdl_button_map {
   int sdl;
@@ -3398,19 +3412,7 @@ int main(int argc, char **argv) {
     if (n > 0) {
       if (!HandleRFBServerMessage(client)) break;
     }
-    if (n == 0 && g_hp.post_rekey_ready == 2 && g_hp.post_rekey_server_records > 1 &&
-        g_hp.post_rekey_phase == 0 && !g_hp.post_rekey_sent) {
-      if (!apple_hp_send_post_rekey_setup(client)) break;
-    }
-    if (n == 0 && g_hp.post_rekey_ready == 2 && g_hp.post_rekey_server_records > 2 &&
-        g_hp.post_rekey_phase == 1 && !g_hp.post_rekey_sent) {
-      if (!apple_hp_send_post_rekey_setup(client)) break;
-    }
-    if (n == 0 && g_hp.post_rekey_ready == 2 && g_hp.post_rekey_phase == 2 &&
-        !g_hp.post_rekey_sent) {
-      if (!apple_hp_send_post_rekey_setup(client)) break;
-      g_hp.post_rekey_ready = 0;
-    }
+    if (n == 0 && !apple_hp_maybe_advance_post_rekey_setup(client)) break;
     if (n == 0 && !apple_hp_maybe_handle_dynamic_request_timeout(client)) break;
     if (n == 0 && !apple_hp_maybe_request_pending_region_refresh(client)) break;
     if (n == 0 && !apple_hp_maybe_retry_initial_full_refresh(client)) break;
