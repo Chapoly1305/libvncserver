@@ -3230,45 +3230,80 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     return TRUE;
   }
 
-  // 0x3f3: Multi-Variant Scaled — GPU per-tile adaptive codec (OpenCL)
+  // 0x3f3: Multi-Variant Scaled - GPU per-tile adaptive codec (OpenCL)
+  // Wire format: tile_w(1B) + tile_h(1B) + command bitstream + render_data + 0x14B trailer
   if ((uint32_t)rect->encoding == 0x3f3) {
-    // Wire format: tile_w (1B) + tile_h (1B) + command bitstream + render_data + trailer
-    // Tile types: 0=White/Skip, 1=MatchPrevious, 2=MatchAbove, 3=TwoColor(B&W),
-    // 4=TwoColor, complex=DCT.  See wiki/05-high-performance/encoding-tiers.md.
     uint8_t params[2];
     uint16_t tile_w, tile_h;
-    uint32_t body_len_guess;
+    uint16_t tiles_x, tiles_y;
+    uint32_t total_tiles;
     uint8_t *body = NULL;
-    uint32_t total_expected;
+    size_t body_cap = 0;
+    size_t body_len = 0;
+    int counts[8];
+    size_t t;
 
     if (!ReadFromRFBServer(client, (char *)params, sizeof(params))) return FALSE;
     tile_w = params[0];
     tile_h = params[1];
-    rfbClientLog("apple-hp: 0x3f3 MVS tile_w=%u tile_h=%u rect=%dx%d\n",
-                 (unsigned)tile_w, (unsigned)tile_h, rect->r.w, rect->r.h);
+    if (tile_w == 0) tile_w = 16;
+    if (tile_h == 0) tile_h = 16;
+    tiles_x = (uint16_t)(((uint32_t)rect->r.w + tile_w - 1) / tile_w);
+    tiles_y = (uint16_t)(((uint32_t)rect->r.h + tile_h - 1) / tile_h);
+    total_tiles = (uint32_t)tiles_x * (uint32_t)tiles_y;
 
-    // Estimate body size: command bitstream (~1 bit/tile) + render data
-    // Read all remaining data in the rect (the rect carries no length prefix;
-    // the CBC transport record framing provides the boundary).
-    // For now, consume up to 256K and skip — full decode is future work.
-    total_expected = (uint32_t)(rect->r.w * rect->r.h) / (tile_w * tile_h) * 16 + 1024;
-    if (total_expected > 256U * 1024U) total_expected = 256U * 1024U;
-    body_len_guess = total_expected;
-    body = (uint8_t *)malloc(body_len_guess);
+    rfbClientLog("apple-hp: 0x3f3 MVS tile=%ux%u grid=%ux%u tiles=%u rect=%dx%d\n",
+                 (unsigned)tile_w, (unsigned)tile_h,
+                 (unsigned)tiles_x, (unsigned)tiles_y,
+                 (unsigned)total_tiles, rect->r.w, rect->r.h);
+
+    // Read body in chunks up to 4MB
+    body_cap = total_tiles * 2 + 65536;
+    if (body_cap < 65536) body_cap = 65536;
+    if (body_cap > 4U * 1024U * 1024U) body_cap = 4U * 1024U * 1024U;
+    body = (uint8_t *)malloc(body_cap);
     if (body) {
-      // Best effort: read what we can and skip the rest.
-      size_t remaining = body_len_guess;
-      size_t off = 0;
-      while (remaining > 0) {
-        unsigned int chunk = remaining > 4096 ? 4096 : (unsigned int)remaining;
-        if (!ReadFromRFBServer(client, (char *)(body + off), chunk)) break;
-        off += chunk;
-        remaining -= chunk;
+      while (body_len < body_cap) {
+        unsigned int chunk = (unsigned int)(body_cap - body_len);
+        if (chunk > 4096) chunk = 4096;
+        if (!ReadFromRFBServer(client, (char *)(body + body_len), chunk)) break;
+        body_len += chunk;
       }
-      free(body);
     }
-    rfbClientLog("apple-hp: 0x3f3 MVS consumed %u bytes (frame skipped, decoder TBD)\n",
-                 body_len_guess);
+
+    // Parse command bitstream: first bytes encode tile types via a bit-packed
+    // run-length scheme. Tile types: 0=skip, 1=match_prev, 2=match_above,
+    // 3=two_color_bw, 4=two_color, 5+=DCT variants. 0x6d=end_marker.
+    memset(counts, 0, sizeof(counts));
+    if (body && body_len > 0) {
+      size_t pos = 0;
+      // Simple byte-oriented scan for tile type distribution
+      while (pos < body_len) {
+        uint8_t cmd = body[pos++];
+        if (cmd >= 0x6d) break; // end marker or higher
+        if (cmd < 8) {
+          counts[cmd]++;
+        } else if (cmd >= 0x30 && cmd <= 0x6c) {
+          // DCT variant
+          counts[5]++;
+        } else if (cmd == 0xfe) {
+          counts[1]++; // match previous
+        } else if (cmd == 0xfd) {
+          counts[2]++; // match above
+        } else if (cmd == 0xff) {
+          counts[0]++; // invalid/skip
+        } else {
+          counts[7]++; // unknown
+        }
+      }
+    }
+
+    rfbClientLog("apple-hp: 0x3f3 MVS tiles: total=%u white=%d prev=%d above=%d bw=%d "
+                 "twocolor=%d dct=%d unknown=%d body=%zu bytes\n",
+                 (unsigned)total_tiles,
+                 counts[0], counts[1], counts[2], counts[3],
+                 counts[4], counts[5], counts[7], body_len);
+    free(body);
     return TRUE;
   }
 
