@@ -3303,7 +3303,7 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
           for (tx = 0; tx < tiles_x && byte_pos < nbytes; tx++, tile_idx++) {
             int copy_src = -1; // -1=none, 0=cur_above, 1=prev_same
             int is_complex = 0;
-            unsigned subtype = 0;
+            int is_dct = 0;
 
             // Read command
             if (byte_pos >= nbytes) break;
@@ -3330,18 +3330,68 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
                   counts[2]++; // match above
                   copy_src = 0;
                 } else {
-                  // Complex: read 3-bit subtype
-                  int j;
-                  subtype = 0;
-                  for (j = 0; j < 3 && byte_pos < nbytes; j++) {
-                    subtype |= ((body[byte_pos] >> bit_pos) & 1) << j;
-                    if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                  {
+                    unsigned subtype = 0;
+                    int j;
+                    for (j = 0; j < 3 && byte_pos < nbytes; j++) {
+                      subtype |= ((body[byte_pos] >> bit_pos) & 1) << j;
+                      if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                    }
+                    if (subtype < 3) counts[3 + subtype]++;
+                    else { counts[5]++; is_dct = 1; }
+                    is_complex = 1;
+                    if (subtype < 3) {
+                      unsigned c0_y = 0, c0_co = 0, c0_cg = 0;
+                      unsigned c1_y = 0, c1_co = 0, c1_cg = 0;
+                      int b;
+                      for (b = 0; b < 8 && byte_pos < nbytes; b++) {
+                        c0_y |= ((body[byte_pos] >> bit_pos) & 1) << b;
+                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                      }
+                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
+                        c0_co |= ((body[byte_pos] >> bit_pos) & 1) << b;
+                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                      }
+                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
+                        c0_cg |= ((body[byte_pos] >> bit_pos) & 1) << b;
+                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                      }
+                      for (b = 0; b < 8 && byte_pos < nbytes; b++) {
+                        c1_y |= ((body[byte_pos] >> bit_pos) & 1) << b;
+                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                      }
+                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
+                        c1_co |= ((body[byte_pos] >> bit_pos) & 1) << b;
+                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                      }
+                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
+                        c1_cg |= ((body[byte_pos] >> bit_pos) & 1) << b;
+                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                      }
+                      {
+                        int Y  = (int)c0_y - 128;
+                        int Co = (int)c0_co - 32;
+                        int Cg = (int)c0_cg - 32;
+                        int r = Y + Co - Cg;
+                        int g = Y + Cg;
+                        int b2 = Y - Co - Cg;
+                        if (r < 0) r = 0; if (r > 255) r = 255;
+                        if (g < 0) g = 0; if (g > 255) g = 255;
+                        if (b2 < 0) b2 = 0; if (b2 > 255) b2 = 255;
+                        uint32_t *pix = (uint32_t *)tile_buf;
+                        uint32_t color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b2;
+                        uint16_t pi;
+                        for (pi = 0; pi < (uint16_t)tile_w * (uint16_t)tile_h; pi++)
+                          pix[pi] = color;
+                      }
+                      { int sb = (int)tile_h * 8;
+                        while (sb > 0 && byte_pos < nbytes) {
+                          sb--;
+                          if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                        }
+                      }
+                    }
                   }
-                  if (subtype < 3) counts[3 + subtype]++;
-                  else counts[5]++;
-                  is_complex = 1;
-                  // TODO: read render data (colors + mask for two-color,
-                  // DCT coefficients for DCT tiles) from the bitstream
                 }
               }
             }
@@ -3354,10 +3404,10 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
               uint16_t th = tile_h;
               if (px + tw > rect->r.w) tw = rect->r.w - px;
               if (py + th > rect->r.h) th = rect->r.h - py;
-              if (is_complex) {
-                // Fill with gray for now
+              if (is_dct) {
+                // DCT tile: fill with gray for now (decoder TBD)
                 memset(tile_buf, 0x80, (size_t)tw * (size_t)th * 4);
-              } else if (copy_src >= 0) {
+              } else if (!is_complex && copy_src >= 0) {
                 uint8_t *src_buf = (copy_src == 0) ? cur_frame : prev_frame;
                 size_t src_stride = (size_t)rect->r.w * 4;
                 size_t src_y_off = (copy_src == 0)
