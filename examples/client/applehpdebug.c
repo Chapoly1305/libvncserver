@@ -3378,16 +3378,30 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
                         if (r < 0) r = 0; if (r > 255) r = 255;
                         if (g < 0) g = 0; if (g > 255) g = 255;
                         if (b2 < 0) b2 = 0; if (b2 > 255) b2 = 255;
-                        uint32_t *pix = (uint32_t *)tile_buf;
-                        uint32_t color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b2;
-                        uint16_t pi;
-                        for (pi = 0; pi < (uint16_t)tile_w * (uint16_t)tile_h; pi++)
-                          pix[pi] = color;
-                      }
-                      { int sb = (int)tile_h * 8;
-                        while (sb > 0 && byte_pos < nbytes) {
-                          sb--;
-                          if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                        // Compute both colors in RGB
+                        int Y1  = (int)c1_y - 128;
+                        int Co1 = (int)c1_co - 32;
+                        int Cg1 = (int)c1_cg - 32;
+                        int r1 = Y1 + Co1 - Cg1;
+                        int g1 = Y1 + Cg1;
+                        int b1 = Y1 - Co1 - Cg1;
+                        if (r1 < 0) r1 = 0; if (r1 > 255) r1 = 255;
+                        if (g1 < 0) g1 = 0; if (g1 > 255) g1 = 255;
+                        if (b1 < 0) b1 = 0; if (b1 > 255) b1 = 255;
+                        uint32_t col0 = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b2;
+                        uint32_t col1 = ((uint32_t)r1 << 16) | ((uint32_t)g1 << 8) | (uint32_t)b1;
+                        // Read per-pixel mask bits and render
+                        {
+                          uint32_t *pix = (uint32_t *)tile_buf;
+                          uint16_t row, col;
+                          for (row = 0; row < tile_h; row++) {
+                            for (col = 0; col < tile_w; col++) {
+                              if (byte_pos >= nbytes) break;
+                              uint8_t mb = (body[byte_pos] >> bit_pos) & 1;
+                              if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+                              pix[row * tile_w + col] = mb ? col1 : col0;
+                            }
+                          }
                         }
                       }
                     }
