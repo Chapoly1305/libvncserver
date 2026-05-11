@@ -2,7 +2,7 @@
 
 ## Frame 5 (protocol_version)
 - Time: `0.136414000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `12`
 ```json
 {
@@ -12,7 +12,7 @@
 
 ## Frame 7 (protocol_version)
 - Time: `0.136825000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `12`
 ```json
 {
@@ -22,7 +22,7 @@
 
 ## Frame 9 (security_types)
 - Time: `0.605188000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `5`
 ```json
 {
@@ -38,7 +38,7 @@
 
 ## Frame 11 (rsa1_client_packet1)
 - Time: `0.738953000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `655`
 ```json
 {
@@ -55,7 +55,7 @@
 
 ## Frame 13 (srp_server_challenge_packet)
 - Time: `0.774777000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `1169`
 ```json
 {
@@ -80,7 +80,7 @@
 
 ## Frame 15 (rsa1_client_packet)
 - Time: `0.926852000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `1080`
 ```json
 {
@@ -172,7 +172,7 @@
 
 ## Frame 17 (srp_server_final_packet)
 - Time: `0.944863000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `102`
 ```json
 {
@@ -193,7 +193,7 @@
 
 ## Frame 19 (security_result)
 - Time: `0.950764000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `4`
 ```json
 {
@@ -203,7 +203,7 @@
 
 ## Frame 21 (client_init)
 - Time: `0.950920000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `1`
 ```json
 {
@@ -214,7 +214,7 @@
 
 ## Frame 23 (server_init)
 - Time: `1.731437000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `63`
 ```json
 {
@@ -233,14 +233,14 @@
     "blue_shift": 0
   },
   "name_len": 39,
-  "name_utf8_lossy": "\u0000\u0000\u0000\u0000\u0000R\ufffd\ufffd\ufffd/\ufffd\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000Alex\u2019s Mac mini",
+  "name_utf8_lossy": "\u0000\u0000\u0000\u0000\u0000R\ufffd\ufffd\ufffd/\ufffd\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000<server-hostname>",
   "name_hex": "000000000052bff6e72fe00000000000000000000000416c6578e2809973204d6163206d696e69"
 }
 ```
 
 ## Frame 25 (unknown)
 - Time: `1.732253000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `66`
 ```json
 {}
@@ -248,7 +248,7 @@
 
 ## Frame 27 (unknown)
 - Time: `1.746945000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `16`
 ```json
 {}
@@ -256,7 +256,7 @@
 
 ## Frame 29 (unknown)
 - Time: `1.801173000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `308`
 ```json
 {}
@@ -264,7 +264,7 @@
 
 ## Frame 30 (unknown)
 - Time: `1.851339000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `52`
 ```json
 {}
@@ -272,7 +272,7 @@
 
 ## Frame 31 (unknown)
 - Time: `1.851430000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `48`
 ```json
 {}
@@ -280,7 +280,7 @@
 
 ## Frame 34 (unknown)
 - Time: `1.855708000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `8`
 ```json
 {}
@@ -288,7 +288,7 @@
 
 ## Frame 36 (unknown)
 - Time: `2.547876000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `310`
 ```json
 {}
@@ -296,7 +296,7 @@
 
 ## Frame 38 (unknown)
 - Time: `2.549289000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `34`
 ```json
 {}
@@ -304,7 +304,7 @@
 
 ## Frame 39 (unknown)
 - Time: `2.553585000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `98`
 ```json
 {}
@@ -312,7 +312,7 @@
 
 ## Frame 40 (unknown)
 - Time: `2.553755000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `50`
 ```json
 {}
@@ -320,7 +320,7 @@
 
 ## Frame 43 (unknown)
 - Time: `2.571394000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `82`
 ```json
 {}
@@ -328,7 +328,7 @@
 
 ## Frame 45 (unknown)
 - Time: `2.576735000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `34`
 ```json
 {}
@@ -336,7 +336,7 @@
 
 ## Frame 46 (unknown)
 - Time: `2.580980000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `130`
 ```json
 {}
@@ -344,7 +344,7 @@
 
 ## Frame 48 (unknown)
 - Time: `2.582482000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `180`
 ```json
 {}
@@ -352,7 +352,7 @@
 
 ## Frame 50 (unknown)
 - Time: `2.593490000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `34`
 ```json
 {}
@@ -360,7 +360,7 @@
 
 ## Frame 52 (unknown)
 - Time: `2.626590000`
-- Path: `192.168.1.180:57847 -> 192.168.1.172:5900`
+- Path: `<viewer-ip>:57847 -> <server-ip>:5900`
 - TCP len: `184`
 ```json
 {}
@@ -368,7 +368,7 @@
 
 ## Frame 54 (unknown)
 - Time: `3.575646000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `1448`
 ```json
 {}
@@ -376,7 +376,7 @@
 
 ## Frame 55 (unknown)
 - Time: `3.575651000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `1448`
 ```json
 {}
@@ -384,7 +384,7 @@
 
 ## Frame 56 (unknown)
 - Time: `3.575653000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `1448`
 ```json
 {}
@@ -392,7 +392,7 @@
 
 ## Frame 57 (unknown)
 - Time: `3.575656000`
-- Path: `192.168.1.172:5900 -> 192.168.1.180:57847`
+- Path: `<server-ip>:5900 -> <viewer-ip>:57847`
 - TCP len: `1448`
 ```json
 {}

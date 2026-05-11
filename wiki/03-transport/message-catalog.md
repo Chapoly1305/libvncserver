@@ -10,7 +10,7 @@ Use this page as a protocol reference, not as a worklog. It summarizes the named
 
 ## Most Important Confirmed Families
 
-- Auth33 / RSA-SRP handshake messages are documented in [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md).
+- Auth33 / RSA-SRP handshake messages are documented in [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md).
 - `0x44f` is `EncodeEncryptionInfo`, the rekey boundary into the Apple CBC record layer.
 - First post-rekey Apple-private rectangles now have stable names:
   - `0x450` `CursorImage`
@@ -35,19 +35,19 @@ Use this page as a protocol reference, not as a worklog. It summarizes the named
 
 - `HandleAuthTypeMessage` / `SendRSAResponseSRPAuthentication` / `HandleSRPAuthenticationMessage` / `SendSRPChallenge`
   - Meaning: security type `33` auth dispatcher and RSA+SRP challenge/response path on server.
-  - Evidence: `wiki/07-reference-generated/symbols/screensharingd.md`, `wiki/02-auth/auth33-reconstruction.md`.
+  - Evidence: `wiki/07-reference-generated/symbols/screensharingd.md`, `wiki/02-auth/auth-33-rsa-srp.md`.
 
 - `SendRSAResponseKeyRequest` / `SendRSAResponsePlainAuthentication` / `SendRSAResponseNewKey` / `SendRSAResponseUnsupported`
   - Meaning: RSA envelope sub-protocol branches selected by `authtype` field (`0/1/2/other`) inside the type-33 auth packet.
-  - Evidence: `wiki/02-auth/auth33-reconstruction.md`, `wiki/06-tooling/binary-baseline.md`.
+  - Evidence: `wiki/02-auth/auth-33-rsa-srp.md`, `wiki/06-tooling/binary-baseline.md`.
 
 - `RSA1` envelope header fields (`version`, `magic`, `authtype`, `aux`)
   - Meaning: stable wire header used by client auth-33 packets before SRP material.
-  - Evidence: pcap frames `11`/`121170` and static parser logic in `screensharingd::sub_100015bdc` (documented in `wiki/02-auth/auth33-reconstruction.md`).
+  - Evidence: pcap frames `11`/`121170` and static parser logic in `screensharingd::sub_100015bdc` (documented in `wiki/02-auth/auth-33-rsa-srp.md`).
 
 - `RSA-SRP` / `SRP-RFC5054-4096-SHA512-PBKDF2` / `ChaCha20-Poly1305` / `SALTED-SHA512-PBKDF2`
   - Meaning: auth-33 cryptographic profile and option set negotiated during handshake.
-  - Evidence: `wiki/07-reference-generated/symbols/screensharingd.md`, `wiki/02-auth/auth33-reconstruction.md`, `apple_hp_vnc.pcapng`.
+  - Evidence: `wiki/07-reference-generated/symbols/screensharingd.md`, `wiki/02-auth/auth-33-rsa-srp.md`, `apple_hp_vnc.pcapng`.
 
 - `HandleViewerInitialization`
   - Meaning: post-auth viewer init phase.

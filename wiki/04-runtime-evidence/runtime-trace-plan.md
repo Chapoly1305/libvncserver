@@ -57,7 +57,7 @@ Each folder should contain:
   - `../06-tooling/scripts/screensharing_workflows.sh auth33 applehpdebug`
 
 Example:
-- `VNC_USER='user' VNC_PASS='pass' ../06-tooling/scripts/screensharing_workflows.sh auth33 applehpdebug 192.168.1.172 5900 180`
+- `VNC_USER='user' VNC_PASS='pass' ../06-tooling/scripts/screensharing_workflows.sh auth33 applehpdebug <server-ip> 5900 180`
 
 What it logs:
 - selected auth + sub-auth (ARD/VeNCrypt/TLS/etc)

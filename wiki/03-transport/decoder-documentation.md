@@ -2,7 +2,7 @@
 
 Reference page for the format-string parsers used during the Screen Sharing entrance and auth handshake. Use this when implementing or extending a decoder for the early frames of a captured session.
 
-For the full auth-33 reconstruction, see [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md). For the on-wire frame ledger of a recorded session, see [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md).
+For the full auth-33 reconstruction, see [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md). For the on-wire frame ledger of a recorded session, see [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md).
 
 ## What The Entrance Window Carries
 
@@ -44,10 +44,10 @@ The negative variants (`%-o`, `%-m`) indicate that the field is consumed without
 
 ## Practical Notes
 
-- The packet-2 `%o%o%s%o` body fits inside the RSA1 envelope's `aux` length. Bytes after `aux` are not consumed by the server in this auth stage (see [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md) — packet-2 segmentation).
+- The packet-2 `%o%o%s%o` body fits inside the RSA1 envelope's `aux` length. Bytes after `aux` are not consumed by the server in this auth stage (see [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md) — packet-2 segmentation).
 - The packet-2 384-byte suffix outside `aux` decodes as 96 little-endian `u32` words; this is allocator residue, not protocol material.
 - The server-final packet includes two 16-byte side fields whose exact semantic role is not yet pinned down — they are consumed but their post-auth use is open.
-- The `ClientInit` byte is assembled from `0x01` (shared flag), `0x80` (enhanced-mode bit), `0x40` (session-select bit). See [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md) for the BN-confirmed builder.
+- The `ClientInit` byte is assembled from `0x01` (shared flag), `0x80` (enhanced-mode bit), `0x40` (session-select bit). See [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md) for the BN-confirmed builder.
 
 ## See Also
 

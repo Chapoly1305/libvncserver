@@ -39,7 +39,7 @@ All approved offsets for these labels are tracked in [../06-tooling/binary-basel
   - height `810`
   - pixel format `32/24`, true-color
   - name length `39`
-  - name payload contains `Alex’s Mac mini`
+  - name payload contains `<server-hostname>`
 
 ### Frame `631` Client -> Server, `66` bytes
 

@@ -83,8 +83,8 @@
   - live `avconferenced` log after removing NoMachine audio devices and attaching AirPods
   - shows a stable `VCCallSession-AudioOnly` with ongoing TX/RX bitrate, IDS datagrams, and `AudioIO ... ready=1`
   - remote audio device state at the same time:
-    - `Alex's AirPods Pro` = default input device
-    - `Alex's AirPods Pro` = default output / system output device
+    - `<user-airpods>` = default input device
+    - `<user-airpods>` = default output / system output device
     - No NoMachine virtual audio devices present
 
 ### Viewer Logic

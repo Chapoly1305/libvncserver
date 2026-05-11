@@ -7,7 +7,7 @@ Use these pages when you need the maintained protocol reference, tooling referen
 - [03-transport/message-catalog.md](03-transport/message-catalog.md)
 - [03-transport/startup-sequence.md](03-transport/startup-sequence.md)
 - [03-transport/decoder-documentation.md](03-transport/decoder-documentation.md)
-- [02-auth/auth33-standalone-spec.md](02-auth/auth33-standalone-spec.md)
+- [02-auth/auth-33-rsa-srp.md](02-auth/auth-33-rsa-srp.md)
 - [05-high-performance/encoding-tiers.md](05-high-performance/encoding-tiers.md)
 
 ## Runtime And Binary Reference

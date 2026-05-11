@@ -1,19 +1,93 @@
-# Video Processing Pipeline
+# Video Pipeline: What's Actually On The Wire
 
-This page describes what we currently believe the Screen Sharing video-processing pipeline actually is, based on the saved native machine/VNC capture, the decrypted post-auth transport trace, and the recovered viewer/framework symbols. The main conclusion is narrower than “Screen Sharing is CPU-based” and narrower than “High Performance means GPU video decode.” What we can say with confidence is that the saved native machine/VNC high-performance session did not use the framework’s compressed-media decode path. Instead, it used a low-latency virtual-display framebuffer path over TCP, with dynamic resolution and Apple-specific display/layout signaling layered around ordinary compressed framebuffer updates.
+There are two distinct content paths inside Screen Sharing: a low-latency **TCP framebuffer path** that the saved native HP capture in this repo actually exercised, and an **AVC media path** that the viewer framework supports but that no capture in this repo has hit. This page draws the line between them, lists the byte-level evidence for the TCP path, and identifies what's known and unknown about the media path.
 
-The session begins with the now-familiar Apple control-plane setup rather than immediately entering a media stream. After authentication, the viewer sends the cleartext `SetEncryption` and `SetMode` messages, then switches to the encrypted Apple transport and sends the encrypted `SetDisplayConfiguration` and `SetEncodings` messages. That sequence is important because it establishes the session shape before any screen-content path is chosen. It gets the viewer onto the real virtual-display branch, but it does not by itself prove anything about AVC or HEVC. The runtime evidence shows that virtual-display activation and media decode are separate questions.
+For session-state context see [acceleration-gates.md](acceleration-gates.md); for the encoding-tier negotiation see [encoding-tiers.md](encoding-tiers.md).
 
-Once the session is established, the decisive behavior for the saved native machine/VNC capture is the virtual-display and layout path. The native logs and prior reconstruction show `usingVirtualDisplay 1`, `initVirtualDisplay`, `gVirtualDisplay1`, `virtualDisplayCount 1`, and `dynamic resolution enabled on server`. On the viewer side, the recovered symbols point to `handleDisplayInfo2:` and related display-configuration handlers as central to this branch. In practical terms, the viewer appears to learn the current scaled display space very early, and the session keeps adapting to that layout. This matters because it explains how the TCP path can still feel “high performance”: it is not just shipping a huge static desktop over VNC, it is maintaining a virtual-display model with dynamic geometry and server-driven resolution behavior.
+## The Two Paths
 
-The most important discovery from the decrypted transport trace is that the content stream itself remains framebuffer traffic. When we decode the saved native transport trace, the stream is dominated by rectangles with RFB encoding `0x6`, which is zlib-compressed framebuffer content. The same trace also carries Apple metadata and control rectangles such as `0x451 AppleDisplayLayout`, `0x453`, `0x455 KeyboardInputSource`, `0x456 DeviceInfo`, and `0x450 CursorImage`. What it does not carry is even more important: there is no recovered `rfbEncodingH264`, no convincing Annex B framing, no AVCC/HVCC-style parameter sets, and no payload family that looks like AVC or HEVC samples being handed to a hardware decoder. The apparent byte patterns that briefly looked like start codes collapse under inspection into ordinary control or zlib payload bytes. For this saved native machine/VNC session, the viewer is therefore best understood as decompressing framebuffer rectangles on the CPU and composing the result as a framebuffer, not as decoding compressed video.
+```mermaid
+flowchart TB
+    Auth[Auth-33 / Auth-36 complete] --> Setup["Encrypted preface:<br/>SetDisplayConfiguration<br/>SetEncodings"]
+    Setup --> Decision{"Acceleration gates<br/>(see acceleration-gates.md)"}
+    Decision -->|gates pass +<br/>AVC negotiated| AVCBranch["AVC media branch<br/>(framework supports it,<br/>not observed in this repo)"]
+    Decision -->|fallback /<br/>VNC path| TCPBranch["TCP framebuffer branch<br/>(observed)"]
+    TCPBranch --> TCPContent["Stream content:<br/>0x6 zlib rectangles<br/>+ Apple-private metadata<br/>+ 0x3f3 MVS tiles"]
+    AVCBranch --> AVCContent["Stream content:<br/>AVC/HEVC samples<br/>via SSFrameBufferAVCMediaView<br/>+ UDP plane"]
+    TCPContent --> CPUDecode["CPU decompress<br/>+ framebuffer composite"]
+    AVCContent --> HWDecode["VideoToolbox decompression<br/>+ media view"]
+```
 
-That finding does not mean the product lacks a real media-decode path. The opposite is true: the viewer framework clearly contains one. The recovered symbols show a separate `SSFrameBufferAVCMediaView` class, and its `isUsingAVCMediaStream` implementation differs from the base framebuffer view path. The framework also exposes `+[SSSession udpSocketWithAVCMediaStreamConfig:port:]`, which implies a distinct media transport setup rather than mere renaming of the normal framebuffer path. Most importantly, the recovered `_GetHEVCDecoderMaxSupportedFrameRate` logic is not cosmetic. Its decompilation shows the viewer creating a format description, attempting to create a decompression session, querying decoder throughput, and calculating per-stream decode frame-rate ceilings. That is strong evidence that Screen Sharing does support a true compressed-media path with real decode capability. The saved machine/VNC capture simply did not enter that branch.
+Both paths can be "high-performance" in product terms — the TCP branch achieves low latency through virtual-display state and dynamic resolution, not through hardware video decode. The two are not synonyms.
 
-The practical interpretation is that “High Performance” currently covers at least two different execution styles. One style is the low-latency virtual-display framebuffer path that we actually observed in the saved native machine/VNC session. In that style, the important optimizations are virtual-display state, dynamic resolution, compact Apple layout/control messages, and compressed framebuffer rectangles over TCP. The other style is a distinct AVC/HEVC media path that the binaries support but that this capture never exercised. The current evidence does not justify collapsing those into one concept. High-performance session state can be real even when the content path is still a TCP framebuffer pipeline.
+## What's In The Observed TCP Stream
 
-This distinction matters directly for the standalone client. If the goal is to match the saved native machine/VNC behavior, then a libvncclient-based implementation does not need GPU video-decode code. The relevant work is instead in efficient TCP framebuffer handling: zlib throughput, reduced redraw/upload churn, correct display/layout handling, and minimization of extra polling or redundant copies. GPU video-decode work only becomes necessary if a future capture or runtime branch actually delivers AVC or HEVC samples to the viewer. Until then, the best model is that the saved native machine/VNC high-performance session is a CPU-side screen-content pipeline wrapped in a more advanced virtual-display session model.
+Decoding the saved native HP transport trace, the post-auth content stream is dominated by classical RFB rectangles plus Apple-private metadata. Counts are approximate (varies per capture) and use encoding IDs from [../03-transport/message-catalog.md](../03-transport/message-catalog.md):
 
-The main open question is not whether the framework can do media decode; the symbols already answer that. The real unresolved question is what exact runtime condition causes a session to choose the AVC media path instead of the TCP virtual-display framebuffer path. We still do not know whether that choice is driven by topology, account class, transport class, display count, codec negotiation, or some later control-plane transition. We also do not yet know whether a machine/VNC session can ever carry AVC/HEVC content over TCP without using the dedicated UDP media plane. Those are the questions that now matter for further reverse-engineering.
+| Encoding | Wire ID | Role | Frequency in observed trace |
+|---|---|---|---|
+| `Zlib` framebuffer | `0x6` | the bulk of screen content | dominant |
+| `CursorImage` | `0x450` | cursor bitmap / hotspot | per cursor change |
+| `AppleDisplayLayout` | `0x451` | display geometry, including dynamic resize | per resize event |
+| `VendorKeysymEncoding` | `0x453` | keysym mapping advertisement | once early |
+| `KeyboardInputSource` | `0x455` | active keyboard layout | once early, then on change |
+| `DeviceInfo` | `0x456` | device identifier / model | once early |
+| `RFBMediaStreamMessage1` | `0x3f2` | ProMode media-init announcement | once when ProMode advertised |
 
-The primary evidence for this page is the decrypted native transport trace and the saved packet capture from the 2026-03-15 native ProMode capture, the viewer-side high-performance analysis in [viewer-track-24G419.md](viewer-track-24G419.md), the architecture model in [../01-architecture/component-map.md](../01-architecture/component-map.md) and [../01-architecture/state-machine.md](../01-architecture/state-machine.md), the encoding-tier spec in [encoding-tiers.md](encoding-tiers.md), and the runtime decision model in [acceleration-gates.md](acceleration-gates.md).
+What the observed trace does **not** carry:
+
+- No `rfbEncodingH264`.
+- No Annex-B start codes (`00 00 00 01`) that survive payload inspection — apparent matches collapse into ordinary zlib or control bytes.
+- No AVCC / HVCC parameter-set extradata structures.
+- No payload family that resembles a compressed video bitstream being handed to a hardware decoder.
+
+Conclusion: the observed native HP session reaches the virtual-display state and emits ProMode media-init signaling, but the actual screen content is decompressed on the CPU as classical zlib framebuffer rectangles. The viewer renders it through the normal `SSFrameBufferView` path, not the AVC media view.
+
+## What The Viewer Framework Could Do
+
+The framework binaries make it clear that a real compressed-media path exists, even though this repo has not yet captured it active.
+
+| Symbol | Implication |
+|---|---|
+| `SSFrameBufferAVCMediaView` (Objective-C class) | A distinct framebuffer-view subclass for AVC media. `-[SSFrameBufferAVCMediaView isUsingAVCMediaStream]` returns `1`; `-[SSFrameBufferView isUsingAVCMediaStream]` and `-[SSFrameBufferAVConferenceView isUsingAVCMediaStream]` both return `0`. |
+| `+[SSSession udpSocketWithAVCMediaStreamConfig:port:]` | A distinct UDP media transport setup, separate from the framebuffer socket. |
+| `_GetHEVCDecoderMaxSupportedFrameRate` | Real capability query: creates a `CMVideoFormatDescription`, attempts `VTDecompressionSessionCreate`, queries `kVTPropertyTypeNumber` decoder throughput, computes per-stream framerate ceilings. Not cosmetic. |
+| Server-side `VTCompressionSessionCreate` in `screensharingd` | Server can produce encoded video samples. |
+| `SSUDPSender ... supports60FPS ...` (`ScreensharingAgent`) | UDP media stream setup with high-FPS gating. |
+
+The viewer's `-[SSSessionView dynamicResolutionModeAvailable]` predicate requires all three of:
+
+1. `frameBufferView.isUsingAVCMediaStream`
+2. `self.isUsingVirtualDisplay`
+3. `frameBufferView.frameBuffer.screenConfiguration.screens.count == 1`
+
+The first gate is the decisive one for the working VNC session: only the `SSFrameBufferAVCMediaView` subclass returns true. In every captured VNC session the viewer instantiated the base `SSFrameBufferView`, not the AVC subclass, so dynamic-resolution mode could never engage despite the other two conditions being satisfied. Detailed viewer-side analysis: [viewer-track-24G419.md](viewer-track-24G419.md).
+
+## What This Means For The Standalone Client
+
+If the goal is to match observed native HP behaviour, a `libvncclient`-based standalone client **does not need GPU video-decode code**. The work it actually needs is:
+
+- Correct `SetDisplayConfiguration` body, including the virtual-display fields.
+- Efficient zlib throughput for `0x6` framebuffer rectangles.
+- Handlers for `0x450`, `0x451`, `0x453`, `0x455`, `0x456` (consumed as `FramebufferUpdate` rectangles, not standalone messages).
+- Dynamic framebuffer resize on every `0x451 AppleDisplayLayout`.
+- Suppression of redundant `0x03 FramebufferUpdateRequest` polling once `0x09 AutoFrameBufferUpdate` is active.
+- Optionally `0x3f3` multi-variant codec decoding for higher-quality content (see [encoding-tiers.md](encoding-tiers.md)).
+
+VideoToolbox / AVC decoding becomes relevant only when a future capture or runtime branch actually delivers AVC/HEVC samples — at which point the open questions below need to be resolved first.
+
+## Open Questions
+
+- What exact runtime condition causes the viewer to instantiate `SSFrameBufferAVCMediaView` instead of `SSFrameBufferView`? Candidate inputs include topology (machine/VNC vs Apple ID), transport class (TCP vs quick-relay), explicit codec negotiation, and saved per-host preferences.
+- Can a machine/VNC session ever carry AVC/HEVC content over TCP without using the dedicated UDP media plane?
+- Whether the `0x3f2 RFBMediaStreamMessage1` announcement is followed by real UDP media in any session — the observed announcements describe ports `5900`/`5901` but no UDP traffic appears on those ports in the saved capture.
+
+These questions are tracked in [../08-tracking/open-questions.md](../08-tracking/open-questions.md).
+
+## See Also
+
+- Encoding-tier negotiation that picks zlib vs `0x3f3` vs `0x3ea`: [encoding-tiers.md](encoding-tiers.md)
+- Three-gate acceleration model: [acceleration-gates.md](acceleration-gates.md)
+- Apple-private rectangle wire formats: [../03-transport/message-catalog.md](../03-transport/message-catalog.md)
+- Viewer-side AVC class hierarchy: [viewer-track-24G419.md](viewer-track-24G419.md)
+- Architecture overview: [../01-architecture/component-map.md](../01-architecture/component-map.md)

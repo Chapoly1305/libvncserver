@@ -4,8 +4,8 @@ One-screen snapshot of the maintained spec state. Each line is a pointer — fol
 
 ## What Is Settled
 
-- **Auth33 (Apple `RSA-SRP`)** works end-to-end in a standalone client — PBKDF2-HMAC-SHA512 password preprocessing, empty-username SRP step, in-process RSA packet-1 generation. See [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md) and [../02-auth/auth33-standalone-spec.md](../02-auth/auth33-standalone-spec.md).
-- **Post-auth rekey** at the `0x44f EncodeEncryptionInfo` rectangle: AES-CBC record layer with the next key/IV distributed by that packet. See [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md) (runtime key install) and [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md) (frame ledger).
+- **Auth33 (Apple `RSA-SRP`)** works end-to-end in a standalone client — PBKDF2-HMAC-SHA512 password preprocessing, empty-username SRP step, in-process RSA packet-1 generation. See [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md). Direct SRP (type 36) and Kerberos (type 35) also work — see [../02-auth/overview.md](../02-auth/overview.md) for the four-method picture.
+- **Post-auth rekey** at the `0x44f EncodeEncryptionInfo` rectangle: AES-CBC record layer with the next key/IV distributed by that packet. See [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md) (runtime key install) and [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md) (frame ledger).
 - **Native-compatible startup sequence** from `ViewerInfo` through the first post-rekey control burst is reproduced closely enough to stream framebuffer updates on localhost. See [../03-transport/startup-sequence.md](../03-transport/startup-sequence.md).
 - **Apple-private rectangle encodings** `0x450 CursorImage`, `0x451 AppleDisplayLayout`, `0x453 VendorKeysymEncoding`, `0x455 KeyboardInputSource`, `0x456 DeviceInfo`, and `0x3f2 RFBMediaStreamMessage1` are mapped well enough for a working consumer. See [../03-transport/message-catalog.md](../03-transport/message-catalog.md).
 - **Encoding-tier model**: five tiers selected by `+[SSSession qualityEncodingsForMode:withDisplayConfiguration:]` and chosen by the `quality=` URL parameter. See [../05-high-performance/encoding-tiers.md](../05-high-performance/encoding-tiers.md).
@@ -26,7 +26,7 @@ The full open list lives in [../08-tracking/open-questions.md](../08-tracking/op
 
 ## Best Reading Order
 
-1. [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md)
+1. [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md)
 2. [../03-transport/startup-sequence.md](../03-transport/startup-sequence.md)
 3. [../03-transport/message-catalog.md](../03-transport/message-catalog.md)
 4. [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md)

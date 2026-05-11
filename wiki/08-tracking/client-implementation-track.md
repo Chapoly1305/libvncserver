@@ -134,7 +134,7 @@ This page is a scoped worklog for the standalone client effort. It is not the ca
 - `confirmed`: the auth33 packet-1 RSA plaintext is now recovered from the native viewer instead of guessed:
   - viewer-side `SecKeyEncrypt(..., padding=PKCS1)` runs immediately before the `654`-byte type-2 RSA1 init write
   - Binary Ninja on `ScreenSharing.framework::_srp_client_mech_step` plus the runtime trace now decode that plaintext as `u32_be payloadLen || %s(\"\") || %s(username) || %s(\"\") || %o(empty)`
-  - for `alex`, the plaintext bytes are `0000000b00000004616c6578000000`
+  - for the username `user`, the plaintext bytes are `0000000b0000000475736572000000`
   - the matching wire packet still uses `aux=0x0100`; first `256` body bytes are ciphertext and the remaining `384` body bytes are zero
 - `confirmed`: generating packet-1 ciphertext from the type-0 DER public key reply with PKCS#1 RSA now works against the live host:
   - a temporary helper using `openssl pkeyutl -encrypt -pubin -keyform DER -pkeyopt rsa_padding_mode:pkcs1` authenticates successfully
@@ -240,7 +240,7 @@ This page is a scoped worklog for the standalone client effort. It is not the ca
     - remaining control fields zero in the current localhost sample
   - `strong-inference`: `0x3f2` is a media-init announcement, not the media stream itself; the successful saved native pcap does not show matching UDP traffic on those ports
   - new native-viewer persistence evidence now narrows that gating surface further:
-    - `~/Library/Containers/com.apple.ScreenSharing/Data/Library/Preferences/com.apple.ScreenSharing.plist` stores `supportsProMode = true` for the `Alexs-Mac-mini.local` session
+    - `~/Library/Containers/com.apple.ScreenSharing/Data/Library/Preferences/com.apple.ScreenSharing.plist` stores `supportsProMode = true` for the `<server-hostname>` session
     - the same saved connection encodes `displayConfiguration.displayType.virtualDisplays.numberOfDisplays = 0`
     - strong-inference: the current localhost ProMode-forcing Frida hook still leaves the native viewer on a different request shape than the earlier successful native virtual-display capture
 - `confirmed`: the successful native `usingVirtualDisplay 1` capture stores the decisive request sequence in its Frida trace, not in markdown.

@@ -1,101 +1,112 @@
-# Component Map (24G231)
+# Component Map
 
-## Scope
-- Build: macOS Sequoia 15.7.1, `24G231`
-- Focus: Screen Sharing high-performance path (control flow + service orchestration)
+The Screen Sharing system is split across four binaries plus a set of private frameworks. This page documents what each component does, how launchd activates them, and the IPC edges between them.
 
-## Primary Components
-- `Shared Screen Viewer`
-  - Path: `/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Support/Shared Screen Viewer.app/Contents/MacOS/Shared Screen Viewer`
-  - Role: viewer/client UI, session/control-mode orchestration, IDS-based invitation/address resolution.
-  - Evidence:
-    - `IDSSession/IDSService` symbols and `SSAddressResolver` methods in `wiki/07-reference-generated/symbols/Shared_Screen_Viewer.bn.md`.
-    - Control/observe support keypaths in `wiki/07-reference-generated/symbols/Shared_Screen_Viewer.bn.md`.
+## Process Map
 
-- `screensharingd`
-  - Path: `/System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd`
-  - Role: daemon-side session/auth/control state machine for VNC/RFB endpoint + viewer management.
-  - Evidence:
-    - `AuthenticateAndAuthorizeTheViewer`, `HandleViewer*`, `HandleModifySession`, `HandleCodecChanged` strings in `wiki/07-reference-generated/symbols/screensharingd.md`.
-    - LaunchDaemon socket/mach service in `raw/plists/com.apple.screensharing.plist.txt`.
+```mermaid
+flowchart TB
+    subgraph Client["Client machine"]
+        SSV["Shared Screen Viewer<br/>(viewer / UI)"]
+    end
+    subgraph Server["Server machine"]
+        SSD["screensharingd<br/>(session / auth)"]
+        SSA["ScreensharingAgent<br/>(media / UDP)"]
+        AVS["AppleVNCServer<br/>(Messages-agent path)"]
+    end
+    subgraph Net["Network"]
+        IDS["IDS / Apple ID relay"]
+        Bonjour["Bonjour rfb /<br/>vnc-server"]
+    end
+    SSV -->|RFB 003.889<br/>TCP :5900| SSD
+    SSV -.->|invitation / address| IDS
+    IDS -.->|launch hint| SSD
+    SSV -.->|Messages relay| AVS
+    SSD <-->|Mach: ScreenChanges,<br/>SetControl, DisplayConfig| SSA
+    SSA -->|UDP media<br/>(ProMode branch)| SSV
+    Bonjour --> SSD
+```
 
-- `ScreensharingAgent`
-  - Path: `/System/Library/CoreServices/RemoteManagement/ScreensharingAgent.bundle/Contents/MacOS/ScreensharingAgent`
-  - Role: media path and UDP stream handling; appears to host pro/high-perf media session operations.
-  - Evidence:
-    - `SSUDPSender` API surface and `supports60FPS` stream creation methods in `wiki/07-reference-generated/symbols/ScreensharingAgent.bn.md`.
-    - `ProMode active/not active` and `Release UDP Streaming` strings in `wiki/07-reference-generated/symbols/ScreensharingAgent.bn.md`.
+Solid lines are observed in this repo's captures. Dotted lines are paths the binaries support that this repo has not yet exercised end-to-end (Apple ID / IDS, UDP media).
 
-- `AppleVNCServer`
-  - Path: `/System/Library/CoreServices/RemoteManagement/AppleVNCServer.bundle/Contents/MacOS/AppleVNCServer`
-  - Role: additional server/agent path used by launch agent `com.apple.screensharing.MessagesAgent`; overlaps with viewer/auth/session handling APIs.
-  - Evidence:
-    - Auth/viewer handling strings in `wiki/07-reference-generated/symbols/AppleVNCServer.md`.
-    - `com.apple.private.screensharing.screenControl` entitlement in `raw/entitlements_AppleVNCServer.xml`.
+## Components
 
-- `ScreenSharing.framework` and `ScreenSharingUI.framework`
-  - Paths rooted at `/Volumes/MacintoshHD/System/Library/PrivateFrameworks/ScreenSharing.framework`
-  - Notes: top-level framework binaries are broken symlinks in this extracted image; code resides in dyld shared cache.
-  - Evidence:
-    - Filesystem inspection showed symlink targets missing as standalone Mach-Os.
-    - dyld map entries in the shared-cache map:
-      - `/System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/ScreenSharing`
-      - `/System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/Frameworks/ScreenSharingUI.framework/Versions/A/ScreenSharingUI`
-      - `/System/Library/PrivateFrameworks/ScreenSharingKit.framework/Versions/A/ScreenSharingKit`
-      - `/System/Library/PrivateFrameworks/ScreenSharingServer.framework/Versions/A/ScreenSharingServer`
+| Component | Path | Role |
+|---|---|---|
+| `Shared Screen Viewer` | `/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Support/Shared Screen Viewer.app/Contents/MacOS/Shared Screen Viewer` | Viewer / client UI; session and control-mode orchestration; IDS-based invitation and address resolution. |
+| `screensharingd` | `/System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd` | Daemon-side session / auth / control state machine; the RFB endpoint at `:5900`; per-viewer state struct. |
+| `ScreensharingAgent` | `/System/Library/CoreServices/RemoteManagement/ScreensharingAgent.bundle/Contents/MacOS/ScreensharingAgent` | Media path: UDP stream setup, codec selection, virtual-display creation, ProMode/HP behaviour. |
+| `AppleVNCServer` | `/System/Library/CoreServices/RemoteManagement/AppleVNCServer.bundle/Contents/MacOS/AppleVNCServer` | Alternate server path used by the Messages launch agent; overlaps in auth and session handling, distinct in IDS routing. |
+| `ScreenSharing.framework` | `/System/Library/PrivateFrameworks/ScreenSharing.framework/Versions/A/ScreenSharing` (dyld-cache-resident) | Viewer-side session, encoding-tier selection, display configuration. |
+| `ScreenSharingUI.framework` | `.../ScreenSharing.framework/Versions/A/Frameworks/ScreenSharingUI.framework` (dyld-cache-resident) | UI surfaces for the viewer. |
+| `ScreenSharingKit.framework` | `/System/Library/PrivateFrameworks/ScreenSharingKit.framework/Versions/A/ScreenSharingKit` | Shared helpers. |
+| `ScreenSharingServer.framework` | `/System/Library/PrivateFrameworks/ScreenSharingServer.framework/Versions/A/ScreenSharingServer` | Server-side helpers. |
 
-## Launchd / Service Chain
-1. `com.apple.screensharing` LaunchDaemon
-- Program: `screensharingd`
-- Socket: Bonjour `rfb`, service `vnc-server`
-- Mach service: `com.apple.screensharing.server`
-- Config in `raw/plists/com.apple.screensharing.plist.txt`
+The four framework binaries are dyld-shared-cache-resident — their top-level Mach-O files are broken symlinks in an extracted filesystem image. Use the dyld cache extractor when symbols are needed; see [../07-reference-generated/dyld-cache-map.md](../07-reference-generated/dyld-cache-map.md).
 
-2. `com.apple.screensharing.agent` LaunchAgent
-- Program: `ScreensharingAgent`
-- Mach service: `com.apple.screensharing.agent`
-- Triggered by notify/watch path launch events
-- Config in `raw/plists/com.apple.screensharing.agent.plist.txt`
+## Launchd / Activation Chain
 
-3. `com.apple.screensharing.MessagesAgent` LaunchAgent
-- Program: `AppleVNCServer`
-- Mach service: `com.apple.screensharing.MessagesAgent`
-- Config in `raw/plists/com.apple.screensharing.MessagesAgent.plist.txt`
+```mermaid
+flowchart LR
+    LD[launchd] -->|TCP :5900 socket<br/>+ Mach service| SSD_svc["com.apple.screensharing<br/>(LaunchDaemon)"]
+    LD -->|Mach service| SSA_svc["com.apple.screensharing.agent<br/>(LaunchAgent, per-user)"]
+    LD -->|Mach service| AVS_svc["com.apple.screensharing.MessagesAgent<br/>(LaunchAgent, per-user)"]
+    IDS_svc["IDS notifications<br/>com.apple.private.alloy.screensharing<br/>com.apple.private.alloy.screensharing.qr"] -->|com.apple.screensharing.idslaunchnotification| LD
+    SSD_svc -.runs.-> SSD2[screensharingd]
+    SSA_svc -.runs.-> SSA2[ScreensharingAgent]
+    AVS_svc -.runs.-> AVS2[AppleVNCServer]
+```
 
-4. IDS service definitions
-- `com.apple.private.alloy.screensharing`
-- `com.apple.private.alloy.screensharing.qr`
-- Both reference `com.apple.screensharing.idslaunchnotification`
-- Config in `raw/plists/com.apple.private.alloy.screensharing*.plist.txt`
+| Service | Type | Program | Mach service | Sockets / triggers |
+|---|---|---|---|---|
+| `com.apple.screensharing` | LaunchDaemon | `screensharingd` | `com.apple.screensharing.server` | Bonjour `rfb` / `vnc-server` on `:5900` |
+| `com.apple.screensharing.agent` | LaunchAgent (per-user) | `ScreensharingAgent` | `com.apple.screensharing.agent` | notify / watch path launch events |
+| `com.apple.screensharing.MessagesAgent` | LaunchAgent (per-user) | `AppleVNCServer` | `com.apple.screensharing.MessagesAgent` | IDS launch notification |
+| `com.apple.private.alloy.screensharing` | IDS service | (notification only) | — | invitation routing |
+| `com.apple.private.alloy.screensharing.qr` | IDS service | (notification only) | — | QR invitation routing |
 
-## IPC/Protocol Edges (Observed Statically)
-- Viewer ↔ IDS layer
-  - `IDSService`, `IDSSession`, `SSAddressResolver ... IDSServiceMessageObserver`
-  - Evidence: `wiki/07-reference-generated/symbols/Shared_Screen_Viewer.bn.md`.
+## IPC Edges
 
-- Viewer ↔ daemon/agent control
-  - Control/observe mode toggles and permission surfaces (`supportsControlMode`, `requestControl`, `allowControl`).
-  - Evidence: `wiki/07-reference-generated/symbols/Shared_Screen_Viewer.bn.md`, `wiki/07-reference-generated/symbols/screensharingd.md`.
+| Edge | Direction | Mechanism | Notes |
+|---|---|---|---|
+| Viewer ↔ daemon | C ↔ S | RFB / TCP on `:5900` | Carries auth, framebuffer, control, and Apple-private rectangles. See [../03-transport/](../03-transport/). |
+| Viewer ↔ IDS | C ↔ Apple | IDS framework | Used for Apple ID invitation and address resolution; not used on the direct VNC path. |
+| Daemon ↔ Agent | S ↔ S | Mach (MIG) RPCs | `SSAgent_MonitorScreenChanges_rpc`, `SSAgent_SetControl_rpc`, `SSAgent_SetDisplayConfiguration_rpc`, `SSAgent_SendScaledScreenMVS_rpc`, plus codec / virtual-display setup. |
+| Agent ↔ Viewer (media) | S → C | UDP media plane (when ProMode active) | `SSUDPSender` orchestration with `supports60FPS`, RTCP timeout handlers, codec config updates. Not observed in this repo's captures. |
+| AppleVNCServer ↔ Messages | S ↔ Apple | IDS via `com.apple.private.alloy.screensharing` | Invitation routing for the Messages-initiated path. |
 
-- Daemon/agent ↔ media plane
-  - `SSUDPSender` orchestration with UDP sockets, stream startup, RTCP timeout handlers, codec config updates.
-  - Evidence: `wiki/07-reference-generated/symbols/ScreensharingAgent.bn.md`.
-  - Callflow evidence:
-    - `-[SSUDPSender createAVCVideoStreamWithRemoteAddress:...supports60FPS...]` calls media session/config helpers and XPC dictionary setup in `symbols/ScreensharingAgent.bn.focus.edges.csv`.
-    - `-[SSUDPSender createNegotiatorOptionsDictionaryFromDisplay:hdr:]` calls display mode/resolution APIs in `symbols/ScreensharingAgent.bn.focus.edges.csv`.
+## Code Anchors
 
-- System policy/privilege gates
-  - TCC/OpenDirectory/security entitlements present in `screensharingd`, `ScreensharingAgent`, `AppleVNCServer`.
-  - Evidence: `raw/entitlements_*.xml`, `symbols/*.md` (linked frameworks include TCC, OpenDirectory symbols).
-  - Callflow evidence:
-    - `ODHelper nodeIsLocal:` calls `_ODSessionCreate` and `_ODSessionNodeNameIsLocal` in both `screensharingd` and `AppleVNCServer` focus edge graphs.
+Per-component representative entry points (for navigation; not exhaustive). All addresses are `24G231` `arm64e` — see [../06-tooling/binary-baseline.md](../06-tooling/binary-baseline.md) for the canonical offset ledger.
 
-## Dependency Highlights
-- `screensharingd` links/imports VideoToolbox and uses `VTCompressionSessionCreate`, indicating encoded video path.
-- `ScreensharingAgent` includes stream/UDP sender classes and `supports60FPS` arguments, indicating high-perf media branch.
-- IDS stack appears on viewer and AppleVNCServer paths for invitation/routing variants.
+| Binary | Symbol | Role |
+|---|---|---|
+| `screensharingd` | `sub_100013900` | `HandleViewerAuthenticationMessage` / `HandleAuthTypeMessage` dispatcher |
+| `screensharingd` | `sub_100036x` (`HandleViewerInitialization`) | post-auth `ClientInit` and `MonitorScreenChanges` kickoff |
+| `screensharingd` | `sub_100020ef8` | `0x44f EncodeEncryptionInfo` sender |
+| `screensharingd` | `sub_100016fb8` | `SetupAESKeys` (post-SRP cryptor install) |
+| `screensharingd` | `sub_10001d19c` / `sub_100031d8c` | post-auth CBC send / receive |
+| `screensharingd` | `sub_100042478` | `EncodeMVS` (`0x3f3` multi-variant codec dispatch) |
+| `ScreensharingAgent` | `MonitorScreenChanges` | virtual-display detection (`kCGDisplayIsVirtualDevice`) |
+| `ScreensharingAgent` | `SSUDPSender` (Objective-C class) | UDP media plane orchestration |
+| `ScreensharingAgent` | OpenCL `EncodeVectorized` kernel | per-tile classification for `0x3f3` |
+| `AppleVNCServer` | (Messages-agent path) | Apple ID / Messages invitation handling |
+| `Shared Screen Viewer` | `+[SSSession qualityEncodingsForMode:withDisplayConfiguration:]` | encoding-tier selection ([../05-high-performance/encoding-tiers.md](../05-high-performance/encoding-tiers.md)) |
+| `Shared Screen Viewer` | `sub_1000f54fa` | `ClientInit` byte builder |
+| `Shared Screen Viewer` | `sub_1000ee62d` | SRP client mech step |
 
-## Known Gaps
-- `ScreenSharing.framework` and nested `ScreenSharingUI.framework` code not present as standalone binaries in extracted filesystem (dyld cache extraction pending).
-- Framework-level selector evidence is now partially recovered in `wiki/07-reference-generated/framework-cache-signals.md`, reducing uncertainty on ProMode gating fields.
-- Runtime logs/pcaps not yet captured in this run; dynamic guards and downgrade events are still inference-level.
+## Capabilities And Entitlements
+
+| Binary | Notable entitlements / linked frameworks |
+|---|---|
+| `screensharingd` | TCC, OpenDirectory, VideoToolbox (`VTCompressionSessionCreate`), CommonCrypto |
+| `ScreensharingAgent` | TCC, IOSurface, CoreMedia, OpenCL, AVFoundation |
+| `AppleVNCServer` | `com.apple.private.screensharing.screenControl`, IDS, OpenDirectory |
+| `Shared Screen Viewer` | IDS, GameKit (AVConference relay), CoreMedia |
+
+## See Also
+
+- Session state transitions: [state-machine.md](state-machine.md)
+- HP / ProMode gating: [../05-high-performance/acceleration-gates.md](../05-high-performance/acceleration-gates.md)
+- Authentication dispatch: [../02-auth/overview.md](../02-auth/overview.md)
+- Generated symbol exports: [../07-reference-generated/](../07-reference-generated/)

@@ -1,6 +1,6 @@
 # Startup Sequence (24G231)
 
-Specification for the native-compatible startup sequence from RFB version exchange to the first post-rekey control burst. Use this page as the protocol order-of-operations reference. Field-level message details belong in [message-catalog.md](message-catalog.md); the rekey crypto sits in [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md).
+Specification for the native-compatible startup sequence from RFB version exchange to the first post-rekey control burst. Use this page as the protocol order-of-operations reference. Field-level message details belong in [message-catalog.md](message-catalog.md); the rekey crypto sits in [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md).
 
 ## Cleartext Prelude
 
@@ -11,7 +11,7 @@ The maintained native-compatible prelude is, in order:
 3. `0x0a SetModeMessage(mode=1)` for the normal control path — wire form `0a000001`
 4. short `0x12` command-2 follow-up — wire form `1200000200010000`
 
-The cleartext window ends at the server's `0x44f EncodeEncryptionInfo` rectangle, which carries the next transport key and IV (see [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md) for the runtime key install). After this point traffic is on the Apple AES-CBC record layer.
+The cleartext window ends at the server's `0x44f EncodeEncryptionInfo` rectangle, which carries the next transport key and IV (see [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md) for the runtime key install). After this point traffic is on the Apple AES-CBC record layer.
 
 ## Encrypted Preface
 
@@ -95,7 +95,7 @@ The `32`-byte tail is a `256`-bit viewer-command support bitmap, not a generic f
 
 ## Adjacent References
 
-- Auth completion and rekey crypto: [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md)
+- Auth completion and rekey crypto: [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md)
 - Message families and Apple-private encodings: [message-catalog.md](message-catalog.md)
 - Frame-level capture ledger: [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md)
 - HP gating after the encoding-tier negotiation: [../05-high-performance/acceleration-gates.md](../05-high-performance/acceleration-gates.md)

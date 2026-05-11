@@ -27,6 +27,8 @@ enum apple_hp_encoding_type {
   APPLE_HP_ENCODING_KEYBOARD_LAYOUT = 0x455,
   APPLE_HP_ENCODING_DISPLAY_INFO = 0x456,
   APPLE_HP_ENCODING_MEDIA_STREAM = 0x3f2,
+  APPLE_HP_ENCODING_MULTI_VARIANT_CODEC = 0x3f3,
+  APPLE_HP_ENCODING_HIGH_QUALITY_CODEC = 0x3ea,
 };
 
 enum apple_hp_auth33_constants {
@@ -433,6 +435,9 @@ apple_hp_make_native_display_configuration(void) {
   apple_hp_store_be16(msg.display.display_info_size_be, sizeof(msg.display));
   memcpy(msg.display.display_info_region, "Screen Sharing Virtual Display",
          sizeof("Screen Sharing Virtual Display"));
+  apple_hp_store_be32(msg.display.display_flags_be,
+                      APPLE_HP_DISPLAY_CONFIG_FLAG_DYNAMIC_RESOLUTION);
+  apple_hp_store_be32(msg.display.display_type_be, 4); /* virtual display */
   apple_hp_store_be_float(msg.display.physical_width_be, 369.4545593261719f);
   apple_hp_store_be_float(msg.display.physical_height_be, 207.81817626953125f);
   apple_hp_store_be32(msg.display.max_width_be, force_simple_1080p ? 1920 : 3840);

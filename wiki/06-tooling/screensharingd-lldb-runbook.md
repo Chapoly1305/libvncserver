@@ -26,7 +26,7 @@ Canonical identity and approved offsets live in [binary-baseline.md](binary-base
 
 ## Session Layout (tmux recommended)
 ```bash
-ssh alex@<host>
+ssh <user>@<host>
 tmux new -s ssdbg
 ```
 

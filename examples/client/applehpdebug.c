@@ -119,6 +119,9 @@ struct apple_hp_session_state {
   int dynamic_request_in_flight;
   int dynamic_refresh_queued_for_request;
   struct apple_hp_transport_state transport;
+  // Codec overflow: trailing bytes after zlib stream end, consumed in next rect
+  uint8_t codec_overflow[16];
+  unsigned int codec_overflow_len;
 };
 
 static struct apple_hp_frame_stats g_frame = {0};
@@ -131,6 +134,8 @@ static struct apple_hp_session_state g_hp = {0};
 static const int32_t kNativePostAuthEncodings[] = {
     0x6,
     0x10,
+    APPLE_HP_ENCODING_MULTI_VARIANT_CODEC,
+    APPLE_HP_ENCODING_HIGH_QUALITY_CODEC,
     (int32_t)0xffffff11u,
     APPLE_HP_ENCODING_CURSOR_IMAGE,
     0x44c,
@@ -994,32 +999,43 @@ static int send_auto_pasteboard_command(rfbClient *client, uint16_t selector) {
 }
 
 static int send_native_post_auth_encodings(rfbClient *client) {
-  int32_t encodings[(sizeof(kNativePostAuthEncodings) / sizeof(kNativePostAuthEncodings[0])) + 2];
+  int32_t encodings[(sizeof(kNativePostAuthEncodings) / sizeof(kNativePostAuthEncodings[0])) + 4];
   size_t count = 0;
   size_t i;
   int add_promode = env_flag_enabled("VNC_APPLE_HP_ADD_PROMODE_ENCODING");
   int prefer_promode = env_flag_enabled("VNC_APPLE_HP_PREFER_PROMODE_ENCODING");
+  int prefer_codec = env_flag_enabled("VNC_APPLE_HP_PREFER_CODEC");
 
   if (!client) return 0;
 
-  if (add_promode && prefer_promode) {
+  // When prefer_codec: put 0x3ea first so server uses High Quality codec.
+  // zlib and zrle follow as fallback. When disabled: zlib stays primary.
+  if (prefer_codec) {
+    encodings[count++] = APPLE_HP_ENCODING_HIGH_QUALITY_CODEC;
+    if (add_promode && prefer_promode) {
+      encodings[count++] = kAppleHPProModeEncoding;
+    }
+  } else if (add_promode && prefer_promode) {
     encodings[count++] = kAppleHPProModeEncoding;
-    rfbClientLog("apple-hp: prepending ProMode SetEncodings capability 0x%03x\n",
-                 kAppleHPProModeEncoding);
   }
 
   for (i = 0; i < sizeof(kNativePostAuthEncodings) / sizeof(kNativePostAuthEncodings[0]); ++i) {
-    if (add_promode && !prefer_promode && kNativePostAuthEncodings[i] == 0x44c) {
+    int32_t enc = kNativePostAuthEncodings[i];
+    // When prefer_codec, 0x3ea was already added at the front; skip it here
+    if (prefer_codec && enc == APPLE_HP_ENCODING_HIGH_QUALITY_CODEC) continue;
+    if (add_promode && !prefer_promode && enc == APPLE_HP_ENCODING_MULTI_VARIANT_CODEC) {
       encodings[count++] = kAppleHPProModeEncoding;
     }
-    encodings[count++] = kNativePostAuthEncodings[i];
+    encodings[count++] = enc;
   }
 
-  if (add_promode && !prefer_promode) {
+  if (add_promode && !prefer_promode && !prefer_codec) {
     rfbClientLog("apple-hp: adding ProMode SetEncodings capability 0x%03x\n",
                  kAppleHPProModeEncoding);
   }
 
+  rfbClientLog("apple-hp: encodings sent count=%zu prefer_codec=%d prefer_promode=%d\n",
+               count, prefer_codec, prefer_promode);
   return SendEncodingsOrdered(client, encodings, count);
 }
 
@@ -2963,7 +2979,302 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     return TRUE;
   }
 
-  if ((uint32_t)rect->encoding != 0x3f2 && (uint32_t)rect->encoding != 0x451 &&
+  // 0x3ea: High Quality codec — 16-bit RGB 5-6-5 pre-processing + zlib level 1
+  // Wire format: 4-byte zlib header (compressed len) + zlib data (same as 0x06)
+  if ((uint32_t)rect->encoding == 0x3ea) {
+    uint8_t zlib_hdr[4];
+    uint32_t nbytes;
+    uint8_t *compressed = NULL;
+    uint8_t *uncompressed = NULL;
+    size_t uncompressed_size;
+    z_stream strm;
+    int zret;
+    uint32_t *dst;
+    const uint8_t *src;
+    size_t pixel_count;
+    size_t i;
+
+    // Use overflow bytes from previous rect if available
+    if (g_hp.codec_overflow_len > 0) {
+      size_t use = g_hp.codec_overflow_len < sizeof(zlib_hdr)
+                       ? g_hp.codec_overflow_len : sizeof(zlib_hdr);
+      memcpy(zlib_hdr, g_hp.codec_overflow, use);
+      if (use < sizeof(zlib_hdr)) {
+        if (!ReadFromRFBServer(client, (char *)(zlib_hdr + use),
+                               (unsigned int)(sizeof(zlib_hdr) - use)))
+          return FALSE;
+      }
+      g_hp.codec_overflow_len = 0;
+    } else {
+      if (!ReadFromRFBServer(client, (char *)zlib_hdr, sizeof(zlib_hdr))) return FALSE;
+    }
+    nbytes = read_be_u32(zlib_hdr);
+    if (nbytes > 256U * 1024U * 1024U) {
+      rfbClientErr("apple-hp: 0x3ea oversized nbytes %u\n", nbytes);
+      return FALSE;
+    }
+
+    compressed = (uint8_t *)malloc(nbytes);
+    if (!compressed) return FALSE;
+    if (!ReadFromRFBServer(client, (char *)compressed, nbytes)) {
+      free(compressed); return FALSE;
+    }
+
+    uncompressed_size = (size_t)rect->r.w * (size_t)rect->r.h * 2;
+    uncompressed = (uint8_t *)malloc(uncompressed_size + 16384);
+    if (!uncompressed) { free(compressed); return FALSE; }
+
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = compressed;
+    strm.avail_in = nbytes;
+    strm.next_out = uncompressed;
+    strm.avail_out = (uInt)(uncompressed_size + 16384);
+    zret = inflateInit(&strm);
+    if (zret != Z_OK) {
+      rfbClientErr("apple-hp: 0x3ea inflateInit failed %d\n", zret);
+      free(compressed); free(uncompressed); return FALSE;
+    }
+    zret = inflate(&strm, Z_FINISH);
+    {
+      size_t produced = strm.total_out;
+      // Save any trailing bytes (not consumed by inflate) for the next rect
+      if (zret == Z_STREAM_END && strm.avail_in > 0 &&
+          strm.avail_in <= sizeof(g_hp.codec_overflow)) {
+        memcpy(g_hp.codec_overflow,
+               compressed + (nbytes - strm.avail_in), strm.avail_in);
+        g_hp.codec_overflow_len = strm.avail_in;
+        rfbClientLog("apple-hp: 0x3ea saved %u overflow bytes for next rect\n",
+                     g_hp.codec_overflow_len);
+      } else {
+        g_hp.codec_overflow_len = 0;
+      }
+      inflateEnd(&strm);
+      rfbClientLog("apple-hp: 0x3ea rect %dx%d nbytes=%u produced=%zu\n",
+                   rect->r.w, rect->r.h, nbytes, produced);
+      if (zret != Z_STREAM_END && !(zret == Z_BUF_ERROR && produced >= uncompressed_size)) {
+        rfbClientErr("apple-hp: 0x3ea inflate failed %d (produced=%zu/%zu) "
+                     "first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                     zret, produced, uncompressed_size,
+                     nbytes >= 1 ? compressed[0] : 0, nbytes >= 2 ? compressed[1] : 0,
+                     nbytes >= 3 ? compressed[2] : 0, nbytes >= 4 ? compressed[3] : 0,
+                     nbytes >= 5 ? compressed[4] : 0, nbytes >= 6 ? compressed[5] : 0,
+                     nbytes >= 7 ? compressed[6] : 0, nbytes >= 8 ? compressed[7] : 0);
+        free(compressed); free(uncompressed); return FALSE;
+      }
+    }
+
+    // Convert 16-bit RGB 5-6-5 to 32-bit XRGB and blit
+    if (client->frameBuffer) {
+      int fb_w = client->width;
+      pixel_count = (size_t)rect->r.w * (size_t)rect->r.h;
+      dst = (uint32_t *)client->frameBuffer + (size_t)rect->r.y * (size_t)fb_w + (size_t)rect->r.x;
+      src = uncompressed;
+      for (i = 0; i < pixel_count; ++i) {
+        uint16_t p = (uint16_t)((src[0] << 8) | src[1]);
+        uint8_t r5 = (uint8_t)((p >> 11) & 0x1f);
+        uint8_t g6 = (uint8_t)((p >> 5) & 0x3f);
+        uint8_t b5 = (uint8_t)(p & 0x1f);
+        dst[i] = ((uint32_t)(r5 << 3 | r5 >> 2) << 16)
+               | ((uint32_t)(g6 << 2 | g6 >> 4) << 8)
+               |  (uint32_t)(b5 << 3 | b5 >> 2);
+        src += 2;
+      }
+      client->GotBitmap(client, (uint8_t *)dst, rect->r.x, rect->r.y, rect->r.w, rect->r.h);
+    }
+    free(uncompressed);
+    return TRUE;
+  }
+
+  // 0x3e9: Medium Quality codec — 8-bit YCoCg dither, 2px/byte + zlib level 6
+  if ((uint32_t)rect->encoding == 0x3e9) {
+    uint8_t zlib_hdr[4];
+    uint32_t compressed_len;
+    uint8_t *compressed = NULL;
+    uint8_t *uncompressed = NULL;
+    size_t uncompressed_size;
+    z_stream strm;
+    int zret;
+    uint32_t *dst;
+    const uint8_t *src;
+    size_t pixel_count;
+    size_t i;
+
+    if (!ReadFromRFBServer(client, (char *)zlib_hdr, sizeof(zlib_hdr))) return FALSE;
+    compressed_len = read_be_u32(zlib_hdr);
+    if (compressed_len > 256U * 1024U * 1024U) {
+      rfbClientErr("apple-hp: 0x3e9 oversized compressed len %u\n", compressed_len);
+      return FALSE;
+    }
+    compressed = (uint8_t *)malloc(compressed_len);
+    if (!compressed) return FALSE;
+    if (!ReadFromRFBServer(client, (char *)compressed, compressed_len)) {
+      free(compressed);
+      return FALSE;
+    }
+
+    // 0x3e9: 2 pixels packed per byte → w*h/2 bytes uncompressed
+    uncompressed_size = ((size_t)rect->r.w * (size_t)rect->r.h) / 2 + 16384;
+    uncompressed = (uint8_t *)malloc(uncompressed_size);
+    if (!uncompressed) { free(compressed); return FALSE; }
+
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = compressed;
+    strm.avail_in = compressed_len;
+    strm.next_out = uncompressed;
+    strm.avail_out = (uInt)uncompressed_size;
+    zret = inflateInit(&strm);
+    if (zret != Z_OK) {
+      rfbClientErr("apple-hp: 0x3e9 inflateInit failed %d\n", zret);
+      free(compressed); free(uncompressed); return FALSE;
+    }
+    zret = inflate(&strm, Z_FINISH);
+    {
+      size_t produced = (size_t)(strm.next_out - uncompressed);
+      if (zret == Z_STREAM_END || (zret == Z_BUF_ERROR && produced > 0)) {
+        // Expand 2px/byte to 32-bit pixels.
+        // TODO: reverse YCoCg dither for accurate color.
+        pixel_count = (size_t)rect->r.w * (size_t)rect->r.h;
+        if (client->frameBuffer) {
+          int fb_w = client->width;
+          dst = (uint32_t *)client->frameBuffer + (size_t)rect->r.y * (size_t)fb_w + (size_t)rect->r.x;
+          src = uncompressed;
+          for (i = 0; i < produced && i * 2 < pixel_count; ++i) {
+            uint8_t b = src[i];
+            // Each byte encodes 2 pixels as 4-bit values; expand to grayscale.
+            uint8_t p0 = (uint8_t)((b >> 4) * 17);  // 4-bit → 8-bit
+            uint8_t p1 = (uint8_t)((b & 0x0f) * 17);
+            dst[i * 2]     = ((uint32_t)p0 << 16) | ((uint32_t)p0 << 8) | p0;
+            dst[i * 2 + 1] = ((uint32_t)p1 << 16) | ((uint32_t)p1 << 8) | p1;
+          }
+          client->GotBitmap(client, (uint8_t *)dst, rect->r.x, rect->r.y, rect->r.w, rect->r.h);
+        }
+      } else {
+        rfbClientErr("apple-hp: 0x3e9 inflate failed %d (produced=%zu)\n", zret, produced);
+      }
+    }
+    inflateEnd(&strm);
+    free(compressed);
+    free(uncompressed);
+    return TRUE;
+  }
+
+  // 0x3e8: Low Quality codec — 4-bit color (16-color palette per 8px) + zlib level 9
+  if ((uint32_t)rect->encoding == 0x3e8) {
+    uint8_t zlib_hdr[4];
+    uint32_t compressed_len;
+    uint8_t *compressed = NULL;
+    uint8_t *uncompressed = NULL;
+    size_t uncompressed_size;
+    z_stream strm;
+    int zret;
+    uint32_t *dst;
+    const uint8_t *src;
+    size_t pixel_count;
+    size_t i;
+
+    if (!ReadFromRFBServer(client, (char *)zlib_hdr, sizeof(zlib_hdr))) return FALSE;
+    compressed_len = read_be_u32(zlib_hdr);
+    if (compressed_len > 256U * 1024U * 1024U) {
+      rfbClientErr("apple-hp: 0x3e8 oversized compressed len %u\n", compressed_len);
+      return FALSE;
+    }
+    compressed = (uint8_t *)malloc(compressed_len);
+    if (!compressed) return FALSE;
+    if (!ReadFromRFBServer(client, (char *)compressed, compressed_len)) {
+      free(compressed);
+      return FALSE;
+    }
+
+    // 0x3e8: 4-bit color, 16-color palette per 8-pixel block
+    uncompressed_size = ((size_t)rect->r.w * (size_t)rect->r.h) / 2 + 16384;
+    uncompressed = (uint8_t *)malloc(uncompressed_size);
+    if (!uncompressed) { free(compressed); return FALSE; }
+
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = compressed;
+    strm.avail_in = compressed_len;
+    strm.next_out = uncompressed;
+    strm.avail_out = (uInt)uncompressed_size;
+    zret = inflateInit(&strm);
+    if (zret != Z_OK) {
+      rfbClientErr("apple-hp: 0x3e8 inflateInit failed %d\n", zret);
+      free(compressed); free(uncompressed); return FALSE;
+    }
+    zret = inflate(&strm, Z_FINISH);
+    {
+      size_t produced = (size_t)(strm.next_out - uncompressed);
+      if (zret == Z_STREAM_END || (zret == Z_BUF_ERROR && produced > 0)) {
+        // Expand 4-bit pixels to 32-bit.
+        // TODO: reverse 16-color palette per 8-pixel block for accurate color.
+        pixel_count = (size_t)rect->r.w * (size_t)rect->r.h;
+        if (client->frameBuffer) {
+          int fb_w = client->width;
+          dst = (uint32_t *)client->frameBuffer + (size_t)rect->r.y * (size_t)fb_w + (size_t)rect->r.x;
+          src = uncompressed;
+          for (i = 0; i < produced && i * 2 < pixel_count; ++i) {
+            uint8_t b = src[i];
+            uint8_t p0 = (uint8_t)((b >> 4) * 17);
+            uint8_t p1 = (uint8_t)((b & 0x0f) * 17);
+            dst[i * 2]     = ((uint32_t)p0 << 16) | ((uint32_t)p0 << 8) | p0;
+            dst[i * 2 + 1] = ((uint32_t)p1 << 16) | ((uint32_t)p1 << 8) | p1;
+          }
+          client->GotBitmap(client, (uint8_t *)dst, rect->r.x, rect->r.y, rect->r.w, rect->r.h);
+        }
+      } else {
+        rfbClientErr("apple-hp: 0x3e8 inflate failed %d (produced=%zu)\n", zret, produced);
+      }
+    }
+    inflateEnd(&strm);
+    free(compressed);
+    free(uncompressed);
+    return TRUE;
+  }
+
+  // 0x3f3: Multi-Variant Scaled — GPU per-tile adaptive codec (OpenCL)
+  if ((uint32_t)rect->encoding == 0x3f3) {
+    // Wire format: tile_w (1B) + tile_h (1B) + command bitstream + render_data + trailer
+    // Tile types: 0=White/Skip, 1=MatchPrevious, 2=MatchAbove, 3=TwoColor(B&W),
+    // 4=TwoColor, complex=DCT.  See wiki/05-high-performance/encoding-tiers.md.
+    uint8_t params[2];
+    uint16_t tile_w, tile_h;
+    uint32_t body_len_guess;
+    uint8_t *body = NULL;
+    uint32_t total_expected;
+
+    if (!ReadFromRFBServer(client, (char *)params, sizeof(params))) return FALSE;
+    tile_w = params[0];
+    tile_h = params[1];
+    rfbClientLog("apple-hp: 0x3f3 MVS tile_w=%u tile_h=%u rect=%dx%d\n",
+                 (unsigned)tile_w, (unsigned)tile_h, rect->r.w, rect->r.h);
+
+    // Estimate body size: command bitstream (~1 bit/tile) + render data
+    // Read all remaining data in the rect (the rect carries no length prefix;
+    // the CBC transport record framing provides the boundary).
+    // For now, consume up to 256K and skip — full decode is future work.
+    total_expected = (uint32_t)(rect->r.w * rect->r.h) / (tile_w * tile_h) * 16 + 1024;
+    if (total_expected > 256U * 1024U) total_expected = 256U * 1024U;
+    body_len_guess = total_expected;
+    body = (uint8_t *)malloc(body_len_guess);
+    if (body) {
+      // Best effort: read what we can and skip the rest.
+      size_t remaining = body_len_guess;
+      size_t off = 0;
+      while (remaining > 0) {
+        unsigned int chunk = remaining > 4096 ? 4096 : (unsigned int)remaining;
+        if (!ReadFromRFBServer(client, (char *)(body + off), chunk)) break;
+        off += chunk;
+        remaining -= chunk;
+      }
+      free(body);
+    }
+    rfbClientLog("apple-hp: 0x3f3 MVS consumed %u bytes (frame skipped, decoder TBD)\n",
+                 body_len_guess);
+    return TRUE;
+  }
+
+  if ((uint32_t)rect->encoding != 0x3f2 && (uint32_t)rect->encoding != 0x3f3 &&
+      (uint32_t)rect->encoding != 0x3ea &&
+      (uint32_t)rect->encoding != 0x451 &&
       (uint32_t)rect->encoding != 0x453 && (uint32_t)rect->encoding != 0x455 &&
       (uint32_t)rect->encoding != 0x456)
     return FALSE;
@@ -2978,6 +3289,42 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     free(payload);
     return FALSE;
   }
+  if ((uint32_t)rect->encoding == 0x3f2) {
+    const uint8_t *body = payload + sizeof(hdr);
+    rfbClientLog("apple-hp: received RFBMediaStreamMessage1 payload_len=%u\n", (unsigned)payload_len);
+    if (payload_len >= 4) {
+      uint32_t version = read_be_u32(body);
+      rfbClientLog("apple-hp:   version=%u\n", (unsigned)version);
+    }
+    if (payload_len >= 8) {
+      uint16_t base_port = read_be_u16(body + 4);
+      uint16_t stream_count = read_be_u16(body + 6);
+      rfbClientLog("apple-hp:   base_udp_port=%u stream_count=%u\n",
+                   (unsigned)base_port, (unsigned)stream_count);
+    }
+    if (payload_len >= 10) {
+      uint16_t next_port = read_be_u16(body + 8);
+      rfbClientLog("apple-hp:   next_port=%u\n", (unsigned)next_port);
+    }
+    if (payload_len >= 36) {
+      rfbClientLog("apple-hp:   tail hex: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                   body[10], body[11], body[12], body[13],
+                   body[14], body[15], body[16], body[17],
+                   body[18], body[19], body[20], body[21],
+                   body[22], body[23], body[24], body[25],
+                   body[26], body[27], body[28], body[29],
+                   body[30], body[31], body[32], body[33],
+                   body[34], body[35]);
+    }
+  }
+		if ((uint32_t)rect->encoding == 0x3f3) {
+			rfbClientLog("apple-hp: received MultiVariantCodec rect payload_len=%u\n",
+			             (unsigned)payload_len);
+		}
+		if ((uint32_t)rect->encoding == 0x3ea) {
+			rfbClientLog("apple-hp: received HighQualityCodec rect payload_len=%u\n",
+			             (unsigned)payload_len);
+		}
   if ((uint32_t)rect->encoding == 0x451 && total_len >= 12) {
     int first_display_layout = !g_hp.displayinfo2_seen;
     g_hp.displayinfo2_seen = 1;

@@ -26,7 +26,7 @@ The static gating surface (server-advertised support, viewer intent, UDP health,
 - Read from `viewer+0x10a2` by `InitializeUDPVideoStream`.
 - Set during `SSAgent_SetDisplayConfiguration_rpc` → `CreateVirtualDisplay` based on the `display_count` field in the client's `SetDisplayConfiguration`.
 - When `>0`, additional media setup occurs and audio is muted.
-- Native viewer persistence shows the connection-time intent: `~/Library/Containers/com.apple.ScreenSharing/Data/Library/Preferences/com.apple.ScreenSharing.plist` stores `supportsProMode = true` for the working `Alexs-Mac-mini.local` session while still carrying `displayConfiguration.displayType.virtualDisplays.numberOfDisplays = 0` — so this gate is influenced by saved per-host configuration in the native viewer.
+- Native viewer persistence shows the connection-time intent: `~/Library/Containers/com.apple.ScreenSharing/Data/Library/Preferences/com.apple.ScreenSharing.plist` stores `supportsProMode = true` for the working `<server-hostname>` session while still carrying `displayConfiguration.displayType.virtualDisplays.numberOfDisplays = 0` — so this gate is influenced by saved per-host configuration in the native viewer.
 
 ## What Is Confirmed
 

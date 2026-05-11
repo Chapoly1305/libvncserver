@@ -9,8 +9,8 @@ Use these pages when you want the design-level explanation of how the system beh
 
 ## Authentication
 
-- [02-auth/authentication-pipeline.md](02-auth/authentication-pipeline.md)
-- [02-auth/auth33-reconstruction.md](02-auth/auth33-reconstruction.md)
+- [02-auth/overview.md](02-auth/overview.md)
+- [02-auth/auth-33-rsa-srp.md](02-auth/auth-33-rsa-srp.md)
 
 ## Transport And Startup
 

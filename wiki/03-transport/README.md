@@ -17,6 +17,6 @@ Post-auth transport: the AES-CBC record layer, the native-compatible startup seq
 
 ## See also
 
-- Auth completion and rekey crypto: [../02-auth/auth33-reconstruction.md](../02-auth/auth33-reconstruction.md).
+- Auth completion and rekey crypto: [../02-auth/auth-33-rsa-srp.md](../02-auth/auth-33-rsa-srp.md).
 - Capture-backed frame ledger: [../04-runtime-evidence/post-auth-stream7-ledger.md](../04-runtime-evidence/post-auth-stream7-ledger.md).
 - HP encoding tiers advertised via `SetEncodings`: [../05-high-performance/encoding-tiers.md](../05-high-performance/encoding-tiers.md).

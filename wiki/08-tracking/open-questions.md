@@ -290,9 +290,9 @@ The encoding-tier model is settled — see [../05-high-performance/encoding-tier
 - Post-auth setup ledger:
   - `../04-runtime-evidence/post-auth-stream7-ledger.md`
 - Auth33 reconstruction:
-  - `../02-auth/auth33-reconstruction.md`
+  - `../02-auth/auth-33-rsa-srp.md`
 - Authentication pipeline:
-  - `../02-auth/authentication-pipeline.md`
+  - `../02-auth/overview.md`
 - Wireshark dissector:
   - `../06-tooling/wireshark/apple_screensharing_auth33.lua`
 - Runtime transport tracer:
