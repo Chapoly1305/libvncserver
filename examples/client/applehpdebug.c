@@ -1005,12 +1005,19 @@ static int send_native_post_auth_encodings(rfbClient *client) {
   int add_promode = env_flag_enabled("VNC_APPLE_HP_ADD_PROMODE_ENCODING");
   int prefer_promode = env_flag_enabled("VNC_APPLE_HP_PREFER_PROMODE_ENCODING");
   int prefer_codec = env_flag_enabled("VNC_APPLE_HP_PREFER_CODEC");
+  int prefer_mvs = env_flag_enabled("VNC_APPLE_HP_PREFER_MVS");
 
   if (!client) return 0;
 
-  // When prefer_codec: put 0x3ea first so server uses High Quality codec.
-  // zlib and zrle follow as fallback. When disabled: zlib stays primary.
-  if (prefer_codec) {
+  // VNC_APPLE_HP_PREFER_MVS: put 0x3f3 first (hardware-accelerated path).
+  // VNC_APPLE_HP_PREFER_CODEC: put 0x3ea first (High Quality codec).
+  // Both default off; zlib is the safe primary.
+  if (prefer_mvs) {
+    encodings[count++] = APPLE_HP_ENCODING_MULTI_VARIANT_CODEC;
+    if (add_promode && prefer_promode) {
+      encodings[count++] = kAppleHPProModeEncoding;
+    }
+  } else if (prefer_codec) {
     encodings[count++] = APPLE_HP_ENCODING_HIGH_QUALITY_CODEC;
     if (add_promode && prefer_promode) {
       encodings[count++] = kAppleHPProModeEncoding;
@@ -1021,7 +1028,7 @@ static int send_native_post_auth_encodings(rfbClient *client) {
 
   for (i = 0; i < sizeof(kNativePostAuthEncodings) / sizeof(kNativePostAuthEncodings[0]); ++i) {
     int32_t enc = kNativePostAuthEncodings[i];
-    // When prefer_codec, 0x3ea was already added at the front; skip it here
+    if (prefer_mvs && enc == APPLE_HP_ENCODING_MULTI_VARIANT_CODEC) continue;
     if (prefer_codec && enc == APPLE_HP_ENCODING_HIGH_QUALITY_CODEC) continue;
     if (add_promode && !prefer_promode && enc == APPLE_HP_ENCODING_MULTI_VARIANT_CODEC) {
       encodings[count++] = kAppleHPProModeEncoding;
@@ -1034,8 +1041,8 @@ static int send_native_post_auth_encodings(rfbClient *client) {
                  kAppleHPProModeEncoding);
   }
 
-  rfbClientLog("apple-hp: encodings sent count=%zu prefer_codec=%d prefer_promode=%d\n",
-               count, prefer_codec, prefer_promode);
+  rfbClientLog("apple-hp: encodings sent count=%zu prefer_mvs=%d prefer_codec=%d prefer_promode=%d\n",
+               count, prefer_mvs, prefer_codec, prefer_promode);
   return SendEncodingsOrdered(client, encodings, count);
 }
 
@@ -3231,78 +3238,63 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   }
 
   // 0x3f3: Multi-Variant Scaled - GPU per-tile adaptive codec (OpenCL)
-  // Wire format: tile_w(1B) + tile_h(1B) + command bitstream + render_data + 0x14B trailer
+  // Wire format: 4-byte nbytes header + tile_w(1B) + tile_h(1B) +
+  // command bitstream + render_data + 0x14B trailer
   if ((uint32_t)rect->encoding == 0x3f3) {
+    uint8_t mvs_hdr[4];
+    uint32_t nbytes;
+    uint8_t *body = NULL;
     uint8_t params[2];
     uint16_t tile_w, tile_h;
     uint16_t tiles_x, tiles_y;
     uint32_t total_tiles;
-    uint8_t *body = NULL;
-    size_t body_cap = 0;
-    size_t body_len = 0;
     int counts[8];
-    size_t t;
 
-    if (!ReadFromRFBServer(client, (char *)params, sizeof(params))) return FALSE;
-    tile_w = params[0];
-    tile_h = params[1];
+    if (!ReadFromRFBServer(client, (char *)mvs_hdr, sizeof(mvs_hdr))) return FALSE;
+    nbytes = read_be_u32(mvs_hdr);
+    if (nbytes < 2 || nbytes > 256U * 1024U * 1024U) {
+      rfbClientErr("apple-hp: 0x3f3 bad nbytes %u\n", nbytes);
+      return FALSE;
+    }
+    body = (uint8_t *)malloc(nbytes);
+    if (!body) return FALSE;
+    if (!ReadFromRFBServer(client, (char *)body, nbytes)) {
+      free(body); return FALSE;
+    }
+
+    tile_w = body[0];
+    tile_h = body[1];
     if (tile_w == 0) tile_w = 16;
     if (tile_h == 0) tile_h = 16;
     tiles_x = (uint16_t)(((uint32_t)rect->r.w + tile_w - 1) / tile_w);
     tiles_y = (uint16_t)(((uint32_t)rect->r.h + tile_h - 1) / tile_h);
     total_tiles = (uint32_t)tiles_x * (uint32_t)tiles_y;
 
-    rfbClientLog("apple-hp: 0x3f3 MVS tile=%ux%u grid=%ux%u tiles=%u rect=%dx%d\n",
+    // Scan body for tile type distribution
+    memset(counts, 0, sizeof(counts));
+    {
+      size_t pos = 2; // skip tile_w, tile_h
+      while (pos < nbytes) {
+        uint8_t cmd = body[pos++];
+        if (cmd >= 0x6d) break;
+        if (cmd < 5) counts[cmd]++;
+        else if (cmd < 8) counts[5]++; // DCT variants
+        else if (cmd == 0xfe) counts[1]++;
+        else if (cmd == 0xfd) counts[2]++;
+        else if (cmd == 0xff) counts[0]++;
+        else counts[7]++;
+      }
+    }
+
+    rfbClientLog("apple-hp: 0x3f3 MVS tile=%ux%u grid=%ux%u total=%u "
+                 "skip=%d prev=%d above=%d bw=%d twocolor=%d dct=%d "
+                 "unk=%d nbytes=%u rect=%dx%d\n",
                  (unsigned)tile_w, (unsigned)tile_h,
                  (unsigned)tiles_x, (unsigned)tiles_y,
-                 (unsigned)total_tiles, rect->r.w, rect->r.h);
-
-    // Read body in chunks up to 4MB
-    body_cap = total_tiles * 2 + 65536;
-    if (body_cap < 65536) body_cap = 65536;
-    if (body_cap > 4U * 1024U * 1024U) body_cap = 4U * 1024U * 1024U;
-    body = (uint8_t *)malloc(body_cap);
-    if (body) {
-      while (body_len < body_cap) {
-        unsigned int chunk = (unsigned int)(body_cap - body_len);
-        if (chunk > 4096) chunk = 4096;
-        if (!ReadFromRFBServer(client, (char *)(body + body_len), chunk)) break;
-        body_len += chunk;
-      }
-    }
-
-    // Parse command bitstream: first bytes encode tile types via a bit-packed
-    // run-length scheme. Tile types: 0=skip, 1=match_prev, 2=match_above,
-    // 3=two_color_bw, 4=two_color, 5+=DCT variants. 0x6d=end_marker.
-    memset(counts, 0, sizeof(counts));
-    if (body && body_len > 0) {
-      size_t pos = 0;
-      // Simple byte-oriented scan for tile type distribution
-      while (pos < body_len) {
-        uint8_t cmd = body[pos++];
-        if (cmd >= 0x6d) break; // end marker or higher
-        if (cmd < 8) {
-          counts[cmd]++;
-        } else if (cmd >= 0x30 && cmd <= 0x6c) {
-          // DCT variant
-          counts[5]++;
-        } else if (cmd == 0xfe) {
-          counts[1]++; // match previous
-        } else if (cmd == 0xfd) {
-          counts[2]++; // match above
-        } else if (cmd == 0xff) {
-          counts[0]++; // invalid/skip
-        } else {
-          counts[7]++; // unknown
-        }
-      }
-    }
-
-    rfbClientLog("apple-hp: 0x3f3 MVS tiles: total=%u white=%d prev=%d above=%d bw=%d "
-                 "twocolor=%d dct=%d unknown=%d body=%zu bytes\n",
                  (unsigned)total_tiles,
                  counts[0], counts[1], counts[2], counts[3],
-                 counts[4], counts[5], counts[7], body_len);
+                 counts[4], counts[5], counts[7],
+                 nbytes, rect->r.w, rect->r.h);
     free(body);
     return TRUE;
   }
