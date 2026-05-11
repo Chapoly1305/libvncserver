@@ -3314,7 +3314,7 @@ static int apple_hp_maybe_request_pending_region_refresh(rfbClient *client) {
 int main(int argc, char **argv) {
   rfbClient *client;
   time_t start;
-  int seconds = 120;
+  int seconds = 0;
   int port = 5900;
   char hostspec[1024];
   const char *host = NULL;
@@ -3325,7 +3325,7 @@ int main(int argc, char **argv) {
   }
 
   signal(SIGINT, on_sigint);
-  g_runtime.live_view = env_flag_enabled("VNC_LIVE_VIEW");
+  g_runtime.live_view = env_flag_default_true("VNC_LIVE_VIEW");
   g_runtime.live_view_vsync = env_flag_enabled("VNC_LIVE_VIEW_VSYNC");
 #if APPLEHPDEBUG_DEBUG_BUILD
   g_runtime.live_view_overlay = env_flag_default_true("VNC_LIVE_VIEW_OVERLAY");
@@ -3375,7 +3375,6 @@ int main(int argc, char **argv) {
   }
   if (argc >= 4) {
     seconds = atoi(argv[3]);
-    if (seconds <= 0) seconds = 120;
   }
 
   apple_hp_seed_known_auth35_realm(host);
@@ -3419,7 +3418,7 @@ int main(int argc, char **argv) {
   }
 
   start = time(NULL);
-  while (!g_stop && (time(NULL) - start) < seconds) {
+  while (!g_stop && (seconds <= 0 || (time(NULL) - start) < seconds)) {
 #if defined(APPLEHPDEBUG_HAS_SDL)
     if (g_runtime.live_view) {
       SDL_Event e;
