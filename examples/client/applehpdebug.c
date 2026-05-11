@@ -3240,15 +3240,20 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
   // 0x3f3: Multi-Variant Scaled - GPU per-tile adaptive codec (OpenCL)
   // Wire format: 4-byte nbytes header + tile_w(1B) + tile_h(1B) +
   // command bitstream + render_data + 0x14B trailer
+  // 0x3f3: Multi-Variant Scaled - GPU per-tile adaptive codec (OpenCL)
+  // Body: tile_w(1B) + tile_h(1B) + command bitstream + data bitstream
+  // Commands: 3-bit fixed codes (0=skip,1=copy_prev,2=copy_above,
+  // 3=two_color,4=solid,5=DCT,6/7=cache) + repeat count
   if ((uint32_t)rect->encoding == 0x3f3) {
     uint8_t mvs_hdr[4];
     uint32_t nbytes;
     uint8_t *body = NULL;
-    uint8_t params[2];
-    uint16_t tile_w, tile_h;
+    uint8_t tile_w, tile_h;
     uint16_t tiles_x, tiles_y;
     uint32_t total_tiles;
     int counts[8];
+    size_t cmd_byte_pos, data_byte_pos;
+    unsigned cmd_bit_pos, data_bit_pos;
 
     if (!ReadFromRFBServer(client, (char *)mvs_hdr, sizeof(mvs_hdr))) return FALSE;
     nbytes = read_be_u32(mvs_hdr);
@@ -3264,219 +3269,126 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
 
     tile_w = body[0];
     tile_h = body[1];
-    if (tile_w == 0) tile_w = 16;
-    if (tile_h == 0) tile_h = 16;
+    if (tile_w < 8) tile_w = 16;
+    if (tile_h < 8) tile_h = 16;
     tiles_x = (uint16_t)(((uint32_t)rect->r.w + tile_w - 1) / tile_w);
     tiles_y = (uint16_t)(((uint32_t)rect->r.h + tile_h - 1) / tile_h);
     total_tiles = (uint32_t)tiles_x * (uint32_t)tiles_y;
+    if (total_tiles == 0) { free(body); return TRUE; }
 
-    // Allocate/validate previous-frame buffer for match-prev tiles
+    // Command bitstream starts at body[2]; data bitstream split point unknown.
+    // For now use single stream: commands and data are interleaved.
+    cmd_byte_pos = 2; cmd_bit_pos = 0;
+    data_byte_pos = 2; data_bit_pos = 0;
+    memset(counts, 0, sizeof(counts));
+
+    // Allocate frame buffers
     {
       size_t fb_bytes = (size_t)rect->r.w * (size_t)rect->r.h * 4;
       static uint8_t *prev_frame = NULL;
       static size_t prev_cap = 0;
-      static uint16_t prev_w = 0, prev_h = 0;
-      uint8_t *cur_frame = NULL;
-
+      uint8_t *cur_frame = (uint8_t *)calloc(1, fb_bytes);
+      uint8_t *tile_buf = (uint8_t *)calloc(1, (size_t)tile_w * (size_t)tile_h * 4);
+      if (!cur_frame || !tile_buf) {
+        free(cur_frame); free(tile_buf); free(body); return FALSE;
+      }
       if (fb_bytes > prev_cap) {
         uint8_t *tmp = (uint8_t *)realloc(prev_frame, fb_bytes);
         if (tmp) { prev_frame = tmp; prev_cap = fb_bytes; }
       }
-      cur_frame = (uint8_t *)calloc(1, fb_bytes);
-      if (!cur_frame) { free(body); return FALSE; }
 
-      memset(counts, 0, sizeof(counts));
+      // Bit reader helper: reads N bits LSB-first from command stream
+      #define MVS_READ_BITS(n, dst) do { \
+        unsigned _n = (n); dst = 0; \
+        unsigned _j; \
+        for (_j = 0; _j < _n && cmd_byte_pos < nbytes; _j++) { \
+          dst |= ((body[cmd_byte_pos] >> cmd_bit_pos) & 1) << _j; \
+          if (++cmd_bit_pos >= 8) { cmd_bit_pos = 0; cmd_byte_pos++; } \
+        } \
+      } while(0)
 
-      // Re-parse bitstream, now with render pass for two-color tiles.
-      // Tile copy loop: raster-scan order, top-to-bottom, left-to-right.
+      // Read repeat count: unary-coded (count 1s until 0)
+      #define MVS_READ_REPEAT() ({ \
+        unsigned _cnt = 0; \
+        while (cmd_byte_pos < nbytes) { \
+          unsigned _b; MVS_READ_BITS(1, _b); \
+          if (_b == 0) break; \
+          _cnt++; \
+        } \
+        _cnt; \
+      })
+
+      uint16_t tx, ty;
+      for (ty = 0; ty < tiles_y; ty++) {
+        for (tx = 0; tx < tiles_x && cmd_byte_pos < nbytes; tx++) {
+          unsigned cmd, repeat;
+          MVS_READ_BITS(3, cmd);
+          repeat = MVS_READ_REPEAT();
+          if (cmd >= 8) cmd = 0;
+          {
+            unsigned rpt = repeat + 1;
+            if (rpt > (unsigned)(tiles_x - tx)) rpt = (unsigned)(tiles_x - tx);
+            counts[cmd] += rpt;
+            tx += (uint16_t)(rpt - 1);
+          }
+        }
+      }
+
+      #undef MVS_READ_BITS
+      #undef MVS_READ_REPEAT
+
+      // Fill all tiles with debug color based on tile type
       {
-        size_t byte_pos = 2;
-        unsigned int bit_pos = 0;
-        uint32_t tile_idx = 0;
-        uint16_t tx, ty;
-        uint32_t dst_fb_w = (uint32_t)(client ? client->width : rect->r.w);
-        uint8_t *dst_base = client ? (uint8_t *)client->frameBuffer : NULL;
-        uint8_t *tile_buf = (uint8_t *)malloc((size_t)tile_w * (size_t)tile_h * 4);
-        if (!tile_buf) { free(cur_frame); free(body); return FALSE; }
-
-        for (ty = 0; ty < tiles_y && byte_pos < nbytes; ty++) {
-          for (tx = 0; tx < tiles_x && byte_pos < nbytes; tx++, tile_idx++) {
-            int copy_src = -1; // -1=none, 0=cur_above, 1=prev_same
-            int is_complex = 0;
-            int is_dct = 0;
-
-            // Read command
-            if (byte_pos >= nbytes) break;
-            uint8_t b0 = (body[byte_pos] >> bit_pos) & 1;
-            if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-
-            if (b0 == 0) {
-              counts[0]++; // skip: copy from prev frame
-              copy_src = 1;
-            } else {
-              if (byte_pos >= nbytes) break;
-              uint8_t b1 = (body[byte_pos] >> bit_pos) & 1;
-              if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-
-              if (b1 == 0) {
-                counts[1]++; // match previous
-                copy_src = 1;
-              } else {
-                if (byte_pos >= nbytes) break;
-                uint8_t b2 = (body[byte_pos] >> bit_pos) & 1;
-                if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-
-                if (b2 == 0) {
-                  counts[2]++; // match above
-                  copy_src = 0;
-                } else {
-                  {
-                    unsigned subtype = 0;
-                    int j;
-                    for (j = 0; j < 3 && byte_pos < nbytes; j++) {
-                      subtype |= ((body[byte_pos] >> bit_pos) & 1) << j;
-                      if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                    }
-                    if (subtype < 3) counts[3 + subtype]++;
-                    else { counts[5]++; is_dct = 1; }
-                    is_complex = 1;
-                    if (subtype < 3) {
-                      unsigned c0_y = 0, c0_co = 0, c0_cg = 0;
-                      unsigned c1_y = 0, c1_co = 0, c1_cg = 0;
-                      int b;
-                      for (b = 0; b < 8 && byte_pos < nbytes; b++) {
-                        c0_y |= ((body[byte_pos] >> bit_pos) & 1) << b;
-                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                      }
-                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
-                        c0_co |= ((body[byte_pos] >> bit_pos) & 1) << b;
-                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                      }
-                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
-                        c0_cg |= ((body[byte_pos] >> bit_pos) & 1) << b;
-                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                      }
-                      for (b = 0; b < 8 && byte_pos < nbytes; b++) {
-                        c1_y |= ((body[byte_pos] >> bit_pos) & 1) << b;
-                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                      }
-                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
-                        c1_co |= ((body[byte_pos] >> bit_pos) & 1) << b;
-                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                      }
-                      for (b = 0; b < 6 && byte_pos < nbytes; b++) {
-                        c1_cg |= ((body[byte_pos] >> bit_pos) & 1) << b;
-                        if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                      }
-                      {
-                        int Y  = (int)c0_y - 128;
-                        int Co = (int)c0_co - 32;
-                        int Cg = (int)c0_cg - 32;
-                        int r = Y + Co - Cg;
-                        int g = Y + Cg;
-                        int b2 = Y - Co - Cg;
-                        if (r < 0) r = 0; if (r > 255) r = 255;
-                        if (g < 0) g = 0; if (g > 255) g = 255;
-                        if (b2 < 0) b2 = 0; if (b2 > 255) b2 = 255;
-                        // Compute both colors in RGB
-                        int Y1  = (int)c1_y - 128;
-                        int Co1 = (int)c1_co - 32;
-                        int Cg1 = (int)c1_cg - 32;
-                        int r1 = Y1 + Co1 - Cg1;
-                        int g1 = Y1 + Cg1;
-                        int b1 = Y1 - Co1 - Cg1;
-                        if (r1 < 0) r1 = 0; if (r1 > 255) r1 = 255;
-                        if (g1 < 0) g1 = 0; if (g1 > 255) g1 = 255;
-                        if (b1 < 0) b1 = 0; if (b1 > 255) b1 = 255;
-                        uint32_t col0 = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b2;
-                        uint32_t col1 = ((uint32_t)r1 << 16) | ((uint32_t)g1 << 8) | (uint32_t)b1;
-                        // Read per-pixel mask bits and render
-                        {
-                          uint32_t *pix = (uint32_t *)tile_buf;
-                          uint16_t row, col;
-                          for (row = 0; row < tile_h; row++) {
-                            for (col = 0; col < tile_w; col++) {
-                              if (byte_pos >= nbytes) break;
-                              uint8_t mb = (body[byte_pos] >> bit_pos) & 1;
-                              if (++bit_pos >= 8) { bit_pos = 0; byte_pos++; }
-                              pix[row * tile_w + col] = mb ? col1 : col0;
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            // Blit tile to current frame
-            {
-              uint16_t px = (uint16_t)(tx * tile_w);
-              uint16_t py = (uint16_t)(ty * tile_h);
-              uint16_t tw = tile_w;
-              uint16_t th = tile_h;
-              if (px + tw > rect->r.w) tw = rect->r.w - px;
-              if (py + th > rect->r.h) th = rect->r.h - py;
-              if (is_dct) {
-                // DCT tile: fill with gray for now (decoder TBD)
-                memset(tile_buf, 0x80, (size_t)tw * (size_t)th * 4);
-              } else if (!is_complex && copy_src >= 0) {
-                uint8_t *src_buf = (copy_src == 0) ? cur_frame : prev_frame;
-                size_t src_stride = (size_t)rect->r.w * 4;
-                size_t src_y_off = (copy_src == 0)
-                    ? ((size_t)(ty > 0 ? ty - 1 : 0) * tile_h * src_stride)
-                    : ((size_t)py * src_stride);
-                uint8_t *src = src_buf + src_y_off + (size_t)px * 4;
-                uint16_t row;
-                for (row = 0; row < th; row++) {
-                  memcpy(tile_buf + (size_t)row * (size_t)tw * 4,
-                         src + (size_t)row * src_stride, (size_t)tw * 4);
-                }
-                // For match_above, the source is from the tile above in cur_frame
-                // but at the SAME x position (not tx-1). We already set src_y_off correctly.
-                // However, the above tile is at (ty-1, tx), same x.
-              }
-              // Copy tile to cur_frame and framebuffer
-              {
-                size_t cur_off = ((size_t)py * (size_t)rect->r.w + (size_t)px) * 4;
-                uint16_t row;
-                for (row = 0; row < th; row++) {
-                  memcpy(cur_frame + cur_off + (size_t)row * (size_t)rect->r.w * 4,
-                         tile_buf + (size_t)row * (size_t)tw * 4, (size_t)tw * 4);
-                }
-                if (dst_base) {
-                  size_t dst_off = ((size_t)(rect->r.y + py) * dst_fb_w + (size_t)(rect->r.x + px)) * 4;
-                  for (row = 0; row < th; row++) {
-                    memcpy(dst_base + dst_off + (size_t)row * dst_fb_w * 4,
-                           tile_buf + (size_t)row * (size_t)tw * 4, (size_t)tw * 4);
-                  }
-                }
-              }
+        uint16_t tx2, ty2;
+        uint32_t colors[8] = {
+          0x00404040, // 0 skip: dark gray
+          0x004040FF, // 1 copy_prev: red
+          0x0040FF40, // 2 copy_above: green  
+          0x00FFFF40, // 3 two_color: yellow
+          0x00FF40FF, // 4 solid: magenta
+          0x00FF4040, // 5 DCT: blue
+          0x0040FFFF, // 6 cache: cyan
+          0x00FFFFFF, // 7 cache2: white
+        };
+        for (ty2 = 0; ty2 < tiles_y; ty2++) {
+          for (tx2 = 0; tx2 < tiles_x; tx2++) {
+            uint16_t px = (uint16_t)(tx2 * tile_w);
+            uint16_t py = (uint16_t)(ty2 * tile_h);
+            uint16_t tw = tile_w, th = tile_h;
+            if (px + tw > rect->r.w) tw = rect->r.w - px;
+            if (py + th > rect->r.h) th = rect->r.h - py;
+            // Use tile index to assign color (we don't have per-tile cmd here)
+            // Just fill with alternating pattern for debug
+            uint32_t c = colors[(tx2 + ty2) & 7];
+            uint32_t *pix = (uint32_t *)tile_buf;
+            uint16_t pi;
+            for (pi = 0; pi < (uint16_t)tw * (uint16_t)th; pi++) pix[pi] = c;
+            // Copy to framebuffer
+            if (client && client->frameBuffer) {
+              uint32_t fb_w = (uint32_t)client->width;
+              uint32_t *dst = (uint32_t *)client->frameBuffer + (size_t)(rect->r.y + py) * fb_w + (size_t)(rect->r.x + px);
+              uint16_t row;
+              for (row = 0; row < th; row++)
+                memcpy(dst + (size_t)row * fb_w, tile_buf + (size_t)row * (size_t)tw * 4, (size_t)tw * 4);
             }
           }
         }
-        free(tile_buf);
-
-        // Swap prev/cur frame
-        if (prev_frame) {
-          memcpy(prev_frame, cur_frame, fb_bytes);
-          prev_w = rect->r.w;
-          prev_h = rect->r.h;
-        }
-        free(cur_frame);
       }
 
-      rfbClientLog("apple-hp: 0x3f3 MVS render tile=%ux%u grid=%ux%u total=%u "
-                   "skip=%d prev=%d above=%d twocolor=%d dct=%d rendered=%u\n",
-                   (unsigned)tile_w, (unsigned)tile_h,
-                   (unsigned)tiles_x, (unsigned)tiles_y,
-                   (unsigned)total_tiles,
-                   counts[0], counts[1], counts[2],
-                   counts[3] + counts[4], counts[5],
-                   (unsigned)(tiles_x * tiles_y));
+      if (prev_frame) memcpy(prev_frame, cur_frame, fb_bytes);
+      free(cur_frame);
+      free(tile_buf);
     }
 
+    rfbClientLog("apple-hp: 0x3f3 MVS tile=%ux%u grid=%ux%u total=%u "
+                 "skip=%d prev=%d above=%d twocol=%d solid=%d "
+                 "dct=%d cache6=%d cache7=%d nbytes=%u rect=%dx%d\n",
+                 (unsigned)tile_w, (unsigned)tile_h,
+                 (unsigned)tiles_x, (unsigned)tiles_y,
+                 (unsigned)total_tiles,
+                 counts[0], counts[1], counts[2], counts[3],
+                 counts[4], counts[5], counts[6], counts[7],
+                 nbytes, rect->r.w, rect->r.h);
     free(body);
     return TRUE;
   }
