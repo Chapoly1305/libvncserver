@@ -2648,7 +2648,10 @@ static rfbBool alloc_live_fb(rfbClient *client) {
       rfbClientErr("live-view: SDL_CreateRenderer failed: %s\n", SDL_GetError());
       return FALSE;
     }
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+    {
+      const char *hint = getenv("VNC_LIVE_VIEW_SCALE_QUALITY");
+      SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, hint ? hint : "linear");
+    }
   }
   SDL_ShowCursor(SDL_DISABLE);
   SDL_RenderSetLogicalSize(g_live.renderer, 0, 0);
