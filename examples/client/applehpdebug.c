@@ -3270,19 +3270,76 @@ static rfbBool handle_hp_probe_encoding(rfbClient *client, rfbFramebufferUpdateR
     tiles_y = (uint16_t)(((uint32_t)rect->r.h + tile_h - 1) / tile_h);
     total_tiles = (uint32_t)tiles_x * (uint32_t)tiles_y;
 
-    // Scan body for tile type distribution
+    // Bit-level command parser. Commands are variable-length bit codes
+    // packed LSB-first. Common tile types get short codes.
     memset(counts, 0, sizeof(counts));
     {
-      size_t pos = 2; // skip tile_w, tile_h
-      while (pos < nbytes) {
-        uint8_t cmd = body[pos++];
-        if (cmd >= 0x6d) break;
-        if (cmd < 5) counts[cmd]++;
-        else if (cmd < 8) counts[5]++; // DCT variants
-        else if (cmd == 0xfe) counts[1]++;
-        else if (cmd == 0xfd) counts[2]++;
-        else if (cmd == 0xff) counts[0]++;
-        else counts[7]++;
+      size_t byte_pos = 2; // skip tile_w, tile_h
+      unsigned int bit_pos = 0;
+      uint32_t parsed = 0;
+      uint8_t raw_first[32];
+      size_t raw_len = nbytes - 2 < 32 ? nbytes - 2 : 32;
+      memcpy(raw_first, body + 2, raw_len);
+
+      while (byte_pos < nbytes && parsed < total_tiles + 16) {
+        // Read next bit
+        uint8_t bit = (body[byte_pos] >> bit_pos) & 1;
+        bit_pos++;
+        if (bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+
+        if (bit == 0) {
+          // 0: skip/white tile (most common)
+          counts[0]++;
+          parsed++;
+        } else {
+          // 1x: need more bits
+          if (byte_pos >= nbytes) break;
+          uint8_t bit2 = (body[byte_pos] >> bit_pos) & 1;
+          bit_pos++;
+          if (bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+
+          if (bit2 == 0) {
+            // 10: match previous frame
+            counts[1]++;
+            parsed++;
+          } else {
+            // 11x: need more bits
+            if (byte_pos >= nbytes) break;
+            uint8_t bit3 = (body[byte_pos] >> bit_pos) & 1;
+            bit_pos++;
+            if (bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+
+            if (bit3 == 0) {
+              // 110: match above
+              counts[2]++;
+              parsed++;
+            } else {
+              // 111: complex tile (DCT, two-color, etc.)
+              // Read 3 more bits for subtype
+              unsigned subtype = 0;
+              int j;
+              for (j = 0; j < 3 && byte_pos < nbytes; j++) {
+                subtype |= ((body[byte_pos] >> bit_pos) & 1) << j;
+                bit_pos++;
+                if (bit_pos >= 8) { bit_pos = 0; byte_pos++; }
+              }
+              if (subtype < 3) counts[3 + subtype]++; // two-color variants
+              else counts[5]++; // DCT
+              parsed++;
+              // TODO: skip render data for complex tiles
+            }
+          }
+        }
+      }
+
+      // Log first 32 bytes of bitstream for debugging
+      {
+        char hex[97];
+        size_t h;
+        for (h = 0; h < raw_len; h++)
+          snprintf(hex + h * 3, 4, "%02x ", raw_first[h]);
+        hex[raw_len * 3] = '\0';
+        rfbClientLog("apple-hp: 0x3f3 bitstream[%zu]: %s\n", raw_len, hex);
       }
     }
 
