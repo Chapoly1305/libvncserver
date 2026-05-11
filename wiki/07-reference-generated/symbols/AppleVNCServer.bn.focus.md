@@ -1,0 +1,72 @@
+# AppleVNCServer Focus Graph
+
+- Binary: `/Volumes/Tools/ScreenSharingWorkspace/Sequoia_15.6_24G84_ScreenSharing/Volumes/MacintoshHD/System/Library/CoreServices/RemoteManagement/AppleVNCServer.bundle/Contents/MacOS/AppleVNCServer`
+- Total functions: `1639`
+- Focus functions: `58`
+- Graph nodes: `198`
+- Graph edges: `220`
+
+## Focus Functions (first 200)
+- `-[QuickrelayHelper initScreenSharingIDSService]`
+- `-[QuickrelayHelper idsServiceQR]`
+- `-[QuickrelayHelper setIdsServiceQR:]`
+- `-[QuickrelayHelper viewerIndex]`
+- `-[QuickrelayHelper setViewerIndex:]`
+- `-[QuickrelayHelper viewer]`
+- `-[QuickrelayHelper setViewer:]`
+- `-[SSAgentScreenCapture stream:didOutputSampleBuffer:ofType:]`
+- `-[SSAgentScreenCapture stream:didStopWithError:]`
+- `-[SSAgentScreenCapture outputVideoEffectDidStartForStream:]`
+- `-[SSAgentScreenCapture outputVideoEffectDidStopForStream:]`
+- `-[SSAgentScreenCapture activeDisplayStreams]`
+- `-[SSAgentScreenCapture setActiveDisplayStreams:]`
+- `-[SSAgentScreenCapture displayIDs]`
+- `-[SSAgentScreenCapture setDisplayIDs:]`
+- `-[SSAgentScreenCapture screenCaptureProcPtr]`
+- `-[SSAgentScreenCapture setScreenCaptureProcPtr:]`
+- `-[ODHelper localUserUIDs]`
+- `-[SystemInformationNotification createNotification:RFBViewerInfoPtr:]`
+- `-[NWConnectionManager observeValueForKeyPath:ofObject:change:context:]`
+- `_CCBigNumModExp`
+- `_CFNotificationCenterAddObserver`
+- `_CFPropertyListCreateData`
+- `_CFPropertyListCreateFromXMLData`
+- `_CFPropertyListWriteToStream`
+- `_CFWriteStreamClose`
+- `_CFWriteStreamCopyProperty`
+- `_CFWriteStreamCreateWithAllocatedBuffers`
+- `_CFWriteStreamOpen`
+- `_CGDataProviderCreateWithCFData`
+- `_CGDataProviderCreateWithData`
+- `_CGDataProviderRelease`
+- `_CGDisplayCopyDisplayMode`
+- `_CGDisplayModeGetPixelsHigh`
+- `_CGDisplayModeGetPixelsWide`
+- `_CGDisplayModeGetResolution`
+- `_CGDisplayModeRelease`
+- `_CGImageCreateWithJPEGDataProvider`
+- `_CGSCopyCurrentSessionDictionary`
+- `_CGSRegisterNotifyProc`
+- `_CGSessionCopyCurrentDictionary`
+- `_DLCSessionBeginSession`
+- `_IOPMAssertionSetProperty`
+- `_IORegistryEntryCreateCFProperty`
+- `_ODSessionCreate`
+- `_ODSessionNodeNameIsLocal`
+- `_TISGetInputSourceProperty`
+- `_ccsrp_get_session_key_length`
+- `_ccsrp_server_compute_session`
+- `_ccsrp_server_verify_session`
+- `_clBuildProgram`
+- `_clCreateProgramWithSource`
+- `_clGetProgramBuildInfo`
+- `_clReleaseProgram`
+- `_objc_getProperty`
+- `_objc_setProperty_atomic`
+- `_objc_setProperty_atomic_copy`
+- `_vproc_swap_integer`
+
+## Outputs
+- `AppleVNCServer.bn.focus.nodes.csv`
+- `AppleVNCServer.bn.focus.edges.csv`
+- `AppleVNCServer.bn.focus.json`

@@ -1,0 +1,122 @@
+# ScreensharingAgent Focus Graph
+
+- Binary: `/Volumes/Tools/ScreenSharingWorkspace/Sequoia_15.6_24G84_ScreenSharing/Volumes/MacintoshHD/System/Library/CoreServices/RemoteManagement/ScreensharingAgent.bundle/Contents/MacOS/ScreensharingAgent`
+- Total functions: `1218`
+- Focus functions: `108`
+- Graph nodes: `286`
+- Graph edges: `556`
+
+## Focus Functions (first 200)
+- `-[SSAgentVirtualDisplay updateDisplayInfo:dynamicResolution:updateDisplayModes:]`
+- `-[SSAgentVirtualDisplay loginWindowSession]`
+- `-[SSUDPSender init]`
+- `-[SSUDPSender initWithDisplays:hdrFlags:audioOffer:video1Offer:video2Offer:sessionID:]`
+- `-[SSUDPSender sendToRemoteAddress:srcAddress:startingUDPPort:audioEncryptionKeyViewerToServer:audioEncryptionKeyServerToViewer:video1EncryptionKeyViewerToServer:video1EncryptionKeyServerToViewer:video2EncryptionKeyViewerToServer:video2EncryptionKeyServerToViewer:sessionID:supports60FPS:sendCursor:avcClientName:]`
+- `-[SSUDPSender createAVCVideoStreamWithRemoteAddress:connectedSocket:displayIDToShare:supports60FPS:sendCursor:audioToken:answerNegotiator:videoEncryptionKeyViewerToServer:videoEncryptionKeyServerToViewer:AVCVideoStream:AVCScreenCapture:avcClientName:]`
+- `-[SSUDPSender createAVCAudioStreamWithRemoteAddress:connectedSocket:audioConfig:avcClientName:]`
+- `-[SSUDPSender createNegotiatorOptionsDictionaryFromDisplay:hdr:]`
+- `-[SSUDPSender answerForViewer]`
+- `-[SSUDPSender start]`
+- `-[SSUDPSender stop]`
+- `-[SSUDPSender pause]`
+- `-[SSUDPSender resume]`
+- `-[SSUDPSender observingLoginWindowSession]`
+- `-[SSUDPSender logUnexpectedVideoConfigInfo:]`
+- `-[SSUDPSender dealloc]`
+- `-[SSUDPSender stream:didStart:error:]`
+- `-[SSUDPSender streamDidStop:]`
+- `-[SSUDPSender streamDidServerDie:]`
+- `-[SSUDPSender stream:didPause:error:]`
+- `-[SSUDPSender stream:didResume:error:]`
+- `-[SSUDPSender stream:didUpdateVideoConfiguration:error:]`
+- `-[SSUDPSender streamDidRTPTimeOut:]`
+- `-[SSUDPSender streamDidRTCPTimeOut:]`
+- `-[SSUDPSender stream:didReceiveRTCPPackets:]`
+- `-[SSUDPSender stream:didGetLastDecodedFrame:]`
+- `-[SSUDPSender stream:downlinkQualityDidChange:]`
+- `-[SSUDPSender stream:uplinkQualityDidChange:]`
+- `-[SSUDPSender streamDidInterruptionBegin:]`
+- `-[SSUDPSender streamDidInterruptionEnd:]`
+- `-[SSUDPSender stream:didStartSynchronizer:error:]`
+- `-[SSUDPSender stream:didReceiveDTMFEventWithDigit:]`
+- `-[SSUDPSender stream:updateInputFrequencyLevel:]`
+- `-[SSUDPSender stream:updateOutputFrequencyLevel:]`
+- `-[SSUDPSender screenCapture:didStop:withError:]`
+- `-[SSUDPSender screenCapture:didStart:withError:]`
+- `-[SSUDPSender serverDidDisconnect:]`
+- `-[SSUDPSender display1UDPSocket]`
+- `-[SSUDPSender setDisplay1UDPSocket:]`
+- `-[SSUDPSender display2UDPSocket]`
+- `-[SSUDPSender setDisplay2UDPSocket:]`
+- `-[SSUDPSender display1]`
+- `-[SSUDPSender setDisplay1:]`
+- `-[SSUDPSender display2]`
+- `-[SSUDPSender setDisplay2:]`
+- `-[SSUDPSender audioAnswerNegotiator]`
+- `-[SSUDPSender setAudioAnswerNegotiator:]`
+- `-[SSUDPSender video1AnswerNegotiator]`
+- `-[SSUDPSender setVideo1AnswerNegotiator:]`
+- `-[SSUDPSender video2AnswerNegotiator]`
+- `-[SSUDPSender setVideo2AnswerNegotiator:]`
+- `-[SSUDPSender videoStream]`
+- `-[SSUDPSender setVideoStream:]`
+- `-[SSUDPSender videoStream2]`
+- `-[SSUDPSender setVideoStream2:]`
+- `-[SSUDPSender audioStream]`
+- `-[SSUDPSender setAudioStream:]`
+- `-[SSUDPSender screenCapture]`
+- `-[SSUDPSender setScreenCapture:]`
+- `-[SSUDPSender screenCapture2]`
+- `-[SSUDPSender setScreenCapture2:]`
+- `-[SSUDPSender mediaStreamSessionID]`
+- `-[SSUDPSender setMediaStreamSessionID:]`
+- `-[SSAgentScreenCapture stream:didOutputSampleBuffer:ofType:]`
+- `-[SSAgentScreenCapture stream:didStopWithError:]`
+- `-[SSAgentScreenCapture outputVideoEffectDidStartForStream:]`
+- `-[SSAgentScreenCapture outputVideoEffectDidStopForStream:]`
+- `-[SSAgentScreenCapture activeDisplayStreams]`
+- `-[SSAgentScreenCapture setActiveDisplayStreams:]`
+- `-[SSAgentScreenCapture displayIDs]`
+- `-[SSAgentScreenCapture setDisplayIDs:]`
+- `-[SSAgentScreenCapture screenCaptureProcPtr]`
+- `-[SSAgentScreenCapture setScreenCaptureProcPtr:]`
+- `-[MenuExtraHelper menuExtraProxy]`
+- `_CFNotificationCenterAddObserver`
+- `_CGDisplayCopyAllDisplayModes`
+- `_CGDisplayCopyDisplayMode`
+- `_CGDisplayModeGetHeight`
+- `_CGDisplayModeGetPixelHeight`
+- `_CGDisplayModeGetPixelWidth`
+- `_CGDisplayModeGetPixelsHigh`
+- `_CGDisplayModeGetPixelsWide`
+- `_CGDisplayModeGetResolution`
+- `_CGDisplayModeGetWidth`
+- `_CGDisplayModeRelease`
+- `_CGDisplayModelNumber`
+- `_CGDisplayPixelsHigh`
+- `_CGDisplaySetDisplayMode`
+- `_CGSCopyCurrentSessionDictionary`
+- `_CGSRegisterNotifyProc`
+- `_CGSReleaseSession`
+- `_CGSessionCopyCurrentDictionary`
+- `_IOPMAssertionSetProperty`
+- `_SACLockScreenImmediate`
+- `_TISGetInputSourceProperty`
+- `_VTCompressionSessionCreate`
+- `_VTSessionCopyProperty`
+- `_VTSessionSetProperty`
+- `_clBuildProgram`
+- `_clCreateProgramWithSource`
+- `_clGetProgramBuildInfo`
+- `_clReleaseProgram`
+- `_objc_getProperty`
+- `_objc_setProperty_atomic`
+- `_objc_setProperty_atomic_copy`
+- `_tcc_authorization_preflight`
+- `_vproc_swap_integer`
+- `_xpc_set_event_stream_handler`
+
+## Outputs
+- `ScreensharingAgent.bn.focus.nodes.csv`
+- `ScreensharingAgent.bn.focus.edges.csv`
+- `ScreensharingAgent.bn.focus.json`

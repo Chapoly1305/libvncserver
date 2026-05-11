@@ -1,0 +1,112 @@
+# screensharingd Focus Graph
+
+- Binary: `/Volumes/Tools/ScreenSharingWorkspace/Sequoia_15.6_24G84_ScreenSharing/Volumes/MacintoshHD/System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd`
+- Total functions: `1538`
+- Focus functions: `98`
+- Graph nodes: `199`
+- Graph edges: `299`
+
+## Focus Functions (first 200)
+- `-[AudioMuteController dealloc]`
+- `-[AudioMuteController init]`
+- `-[AudioMuteController muteAudioOutput:]`
+- `-[AudioMuteController updateDefaultOutputAudioDevice]`
+- `-[AudioMuteController beginObservingDefaultOutputAudioDevice]`
+- `-[AudioMuteController endObservingDefaultOutputAudioDevice]`
+- `+[AudioMuteController defaultOutputAudioDevicePropertyAddress]`
+- `-[AudioMuteController defaultOutputAudioDevice]`
+- `-[AudioMuteController setDefaultOutputAudioDevice:]`
+- `-[AudioMuteController listenerBlock]`
+- `-[AudioMuteController setListenerBlock:]`
+- `-[AudioMuteController muteCount]`
+- `-[AudioMuteController setMuteCount:]`
+- `-[AudioMuteController supportsMute]`
+- `-[AudioMuteController setSupportsMute:]`
+- `-[AudioMuteController .cxx_destruct]`
+- `+[AudioDevice currentDefaultOutputAudioDevice]`
+- `-[AudioDevice initWithIdentifier:]`
+- `-[AudioDevice dealloc]`
+- `-[AudioDevice applyMute:]`
+- `-[AudioDevice outputChannels]`
+- `-[AudioDevice updateMasterVolume]`
+- `-[AudioDevice updateMuteState]`
+- `-[AudioDevice fetchOuputVolumeForOutputChannel:]`
+- `-[AudioDevice beginObservingMuteState]`
+- `-[AudioDevice beginObservingOutputVolume]`
+- `-[AudioDevice endObservingMuteState]`
+- `-[AudioDevice endObservingOutputVolume]`
+- `-[AudioDevice setMute:error:]`
+- `-[AudioDevice setMasterVolume:error:]`
+- `+[AudioDevice outputVolumePropertyAddressForChannel:]`
+- `+[AudioDevice outputMutePropertyAddress]`
+- `+[AudioDevice deviceNamePropertyAddress]`
+- `+[AudioDevice defaultOutputAudioDevicePropertyAddress]`
+- `-[AudioDevice isEqual:]`
+- `-[AudioDevice hash]`
+- `-[AudioDevice copyWithZone:]`
+- `-[AudioDevice identifier]`
+- `-[AudioDevice initiallyMuted]`
+- `-[AudioDevice setInitiallyMuted:]`
+- `-[AudioDevice initialVolume]`
+- `-[AudioDevice setInitialVolume:]`
+- `-[AudioDevice muteStateListenerBlock]`
+- `-[AudioDevice setMuteStateListenerBlock:]`
+- `-[AudioDevice masterVolume]`
+- `-[AudioDevice setMasterVolume:]`
+- `-[AudioDevice isMuted]`
+- `-[AudioDevice setMuted:]`
+- `-[AudioDevice outputVolumesByOutputChannel]`
+- `-[AudioDevice setOutputVolumesByOutputChannel:]`
+- `-[AudioDevice shouldBeMuted]`
+- `-[AudioDevice setShouldBeMuted:]`
+- `-[AudioDevice supportsMute]`
+- `-[AudioDevice setSupportsMute:]`
+- `-[AudioDevice volumeListenerBlocksByOutputChannel]`
+- `-[AudioDevice setVolumeListenerBlocksByOutputChannel:]`
+- `-[AudioDevice .cxx_destruct]`
+- `+[RestrictionsObserver sharedObserver]`
+- `+[RestrictionsObserver _new]`
+- `-[RestrictionsObserver addRestrictionsObserver:]`
+- `-[RestrictionsObserver removeRestrictionsObserver:]`
+- `-[RestrictionsObserver isScreenSharingAllowed]`
+- `-[NWConnectionManager observeValueForKeyPath:ofObject:change:context:]`
+- `-[ODHelper localUserUIDs]`
+- `_AudioObjectAddPropertyListenerBlock`
+- `_AudioObjectGetPropertyData`
+- `_AudioObjectHasProperty`
+- `_AudioObjectRemovePropertyListenerBlock`
+- `_AudioObjectSetPropertyData`
+- `_CCBigNumModExp`
+- `_CFNotificationCenterAddObserver`
+- `_CFPropertyListCreateFromXMLData`
+- `_CFPropertyListWriteToStream`
+- `_CFWriteStreamClose`
+- `_CFWriteStreamCopyProperty`
+- `_CFWriteStreamCreateWithAllocatedBuffers`
+- `_CFWriteStreamOpen`
+- `_CGDataProviderCreateWithCFData`
+- `_CGDataProviderCreateWithData`
+- `_CGDataProviderRelease`
+- `_CGImageCreateWithJPEGDataProvider`
+- `_CGSCreateLoginSessionWithDataAndVisibility`
+- `_CGSSessionCreateSessionIDWithOptions`
+- `_IOPMAssertionSetProperty`
+- `_IORegistryEntryCreateCFProperty`
+- `_ODSessionCreate`
+- `_ODSessionNodeNameIsLocal`
+- `_VTCompressionSessionCreate`
+- `_VTSessionCopyProperty`
+- `_VTSessionSetProperty`
+- `_ccsrp_get_session_key_length`
+- `_ccsrp_server_compute_session`
+- `_ccsrp_server_verify_session`
+- `_objc_getProperty`
+- `_objc_setProperty_atomic`
+- `_objc_setProperty_atomic_copy`
+- `_objc_setProperty_nonatomic_copy`
+- `_vproc_swap_integer`
+
+## Outputs
+- `screensharingd.bn.focus.nodes.csv`
+- `screensharingd.bn.focus.edges.csv`
+- `screensharingd.bn.focus.json`
