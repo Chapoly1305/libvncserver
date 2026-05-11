@@ -30,7 +30,7 @@ This document is the canonical protocol description for the project. Supporting 
 
 ## 2. Conventions and Terminology
 
-The key words "MUST", "MUST NOT", "SHOULD", "SHOULD NOT", and "MAY" in this document are to be interpreted as described in RFC 2119.
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119 and RFC 8174.
 
 The following terms are used throughout this document:
 
@@ -303,7 +303,7 @@ The currently maintained security-type registry is:
 
 | Security Type | Provisional Name | Current status |
 | ---: | --- | --- |
-| `30` | `DH` | Diffie-Hellman / username-password path; not yet fully specified here |
+| `30` | `DH` | Diffie-Hellman / username-password path; specified in §6.2.6 |
 | `31` | `Guest Observe` | guest observe path |
 | `32` | `Guest Control` | guest control path |
 | `33` | `RSA / RSA-SRP` | primary maintained wire specification in this document |
@@ -343,9 +343,27 @@ The branches currently tracked are:
    - `replay_detection`
    - `conf+int=ChaCha20-Poly1305`
    - `kdf=SALTED-SHA512-PBKDF2`
-   The currently observed branch-entry payload is `0x24 00 00 00 0f 00 00 00 0b 00 00 00 04 61 6c 65 78 00 00 00`.
-4. types `30`, `31`, `32`, and `34`
+   The currently observed branch-entry payload is `0x24 00 00 00 0f 00 00 00 0b 00 00 00 04 75 73 65 72 00 00 00`.
+4. type `30`: `DH`
+   This branch is the legacy Apple Remote Desktop scheme. It uses Diffie-Hellman key agreement and an AES-128-ECB encrypted credentials block. See §6.2.6.
+5. types `31`, `32`, and `34`
    These branches remain outside the detailed wire scope of this revision.
+
+Figure 6.2-1 illustrates the master selection across the four specified branches:
+
+```mermaid
+flowchart LR
+    A[SecurityTypeSelection byte] -->|0x1e| B[Type 30: DH<br/>§6.2.6]
+    A -->|0x21| C[Type 33: RSA / RSA-SRP<br/>§6.2.3]
+    A -->|0x23| D[Type 35: Kerberos GSS-API<br/>§6.2.4]
+    A -->|0x24| E[Type 36: Direct SRP<br/>§6.2.5]
+    B --> Z[SecurityResult]
+    C --> Z
+    D --> Z
+    E --> Z
+```
+
+The server commits to the selected branch and proceeds to the corresponding flow. The four branches share no on-wire envelope; only types `33` and `36` share cryptographic primitives (SRP-6a) but with different framing.
 
 #### 6.2.3 Type 33: RSA / RSA-SRP
 
@@ -363,6 +381,32 @@ The maintained type-33 sequence is:
 8. receive `SecurityResult`
 
 Authentication is complete only after the final proof and `SecurityResult = 0`.
+
+Figure 6.2.3-1 illustrates the type-33 exchange:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Security-type 33 selected
+    C->>S: SecurityTypeSelection (0x21)
+
+    Note over C,S: Bootstrap phase
+    C->>S: RSA1 key request (authtype=0)
+    S->>C: server RSA public key (DER SubjectPublicKeyInfo)
+    Note over C: encrypt username plaintext with PKCS#1 v1.5
+    C->>S: RSA1 init (authtype=2, ciphertext + zero pad)
+
+    Note over C,S: SRP phase
+    S->>C: SRP challenge (N, g, salt, B, iterations, options)
+    Note over C: PBKDF2-HMAC-SHA512, compute A and M1
+    C->>S: RSA1 init #2 (authtype=2, SRP response material)
+    S->>C: server-final proof (M2 plus side fields)
+    Note right of C: the client consumes server-final<br/>before reading SecurityResult,<br/>otherwise the next u32 is misread.
+
+    S->>C: SecurityResult (0 = success)
+```
 
 ##### 6.2.3.2 RSA1 Envelope and Key Exchange
 
@@ -648,6 +692,32 @@ The currently observed type-35 authentication flow is:
 
 This flow summary is maintained from corrected on-wire observation of the type-35 branch.
 
+Figure 6.2.4-1 illustrates the type-35 exchange:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Security-type 35 selected
+    C->>S: SecurityTypeSelection (0x23)
+    C->>S: 4-byte zero word
+    S->>C: 4-byte zero / status word
+
+    Note over C: build client / service principals<br/>obtain GSS credential
+    C->>S: length-prefixed AP-REQ token
+
+    Note over S: validate AP-REQ, build AP-REP
+    S->>C: length-prefixed AP-REP token
+
+    Note over C: complete GSS context
+    S->>C: length-prefixed wrap token<br/>(carries post-auth session key)
+
+    Note over C: unwrap to extract session key
+    S->>C: terminal 4-byte zero / status word
+    S->>C: SecurityResult (0 = success)
+```
+
 ##### 6.2.4.2 Current Wire Model
 
 The current maintained type-35 wire model is:
@@ -676,7 +746,7 @@ The currently observed type-36 branch is a direct SRP path rather than the type-
 
 The maintained evidence indicates:
 
-1. the client enters the branch with payload `24 00 00 00 0f 00 00 00 0b 00 00 00 04 61 6c 65 78 00 00 00`
+1. the client enters the branch with payload `24 00 00 00 0f 00 00 00 0b 00 00 00 04 75 73 65 72 00 00 00`
 2. the server emits a length-prefixed SRP challenge
 3. the client emits a length-prefixed SRP response
 4. the branch negotiates SRP options directly
@@ -689,6 +759,28 @@ The maintained evidence indicates:
 
 This flow summary is maintained from on-wire observation of the type-36 branch.
 
+Figure 6.2.5-1 illustrates the type-36 exchange:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Security-type 36 selected<br/>(selector byte embedded in branch entry)
+
+    C->>S: 0x24 + u32 plaintext_len + username envelope
+
+    S->>C: u32 inner_len + SRP challenge<br/>(N, g, salt, B, iterations, options)
+
+    Note over C: PBKDF2-HMAC-SHA512, compute A and M1
+    C->>S: u32 response_len + SRP step-2 inner<br/>(A, M1, options, nonce)
+
+    Note over S: verify M1, derive session key,<br/>initialize negotiated secure layer
+
+    S->>C: u32 token_len + server-final token
+    S->>C: SecurityResult (0 = success)
+```
+
 ##### 6.2.5.2 Current Wire Model
 
 The maintained type-36 branch-entry and early challenge/response model is:
@@ -696,7 +788,7 @@ The maintained type-36 branch-entry and early challenge/response model is:
 - client branch-entry payload:
 
 ```text
-24 00 00 00 0f 00 00 00 0b 00 00 00 04 61 6c 65 78 00 00 00
+24 00 00 00 0f 00 00 00 0b 00 00 00 04 75 73 65 72 00 00 00
 ```
 
 - first large server challenge payload parses as:
@@ -726,7 +818,91 @@ The present maintained conclusions are:
 
 The full record-layer grammar after the initial SRP exchange remains to be completed in a later revision.
 
-#### 6.2.6 Setup Tasks
+#### 6.2.6 Type 30: Diffie-Hellman
+
+##### 6.2.6.1 Flow Summary
+
+The maintained type-30 sequence is:
+
+1. select security type `30`
+2. receive a server DH challenge announcing generator, modulus, and the server public value
+3. encrypt a fixed-size credentials block with a key derived from the DH shared secret
+4. send the encrypted credentials block followed by the client DH public value
+5. receive `SecurityResult`
+
+Type 30 predates the Apple SRP families and is still advertised by current servers. It is the legacy `Apple Remote Desktop` authentication path.
+
+Figure 6.2.6-1 illustrates the type-30 exchange:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Security-type 30 selected
+    C->>S: SecurityTypeSelection (0x1e)
+
+    S->>C: u16 generator + u16 keylen + N + B
+
+    Note over C: a = fresh secret exponent<br/>A = g^a mod N<br/>shared = B^a mod N<br/>k = MD5(shared)
+    Note over C: build 128-byte plaintext<br/>[user:64][pass:64] with random padding<br/>ciphertext = AES-128-ECB(k, plaintext)
+
+    C->>S: 128-byte ciphertext + A (keylen bytes)
+
+    Note over S: derive same k, decrypt credentials,<br/>validate against local account database
+    S->>C: SecurityResult (0 = success)
+```
+
+##### 6.2.6.2 Server Challenge
+
+The server emits:
+
+```text
+u16     generator
+u16     keylen
+byte[]  modulus_N         (length = keylen)
+byte[]  server_public_B   (length = keylen)
+```
+
+The maintained interoperable group is `1024`-bit MODP. The wire fields are big-endian.
+
+##### 6.2.6.3 Client Response
+
+The client computes:
+
+1. fresh secret exponent `a`
+2. `A = g^a mod N`
+3. `shared = B^a mod N`
+4. `k = MD5(shared)`
+5. plaintext credentials block:
+
+```text
+byte[64]  username   (null-terminated UTF-8, remainder filled with cryptographic random bytes)
+byte[64]  password   (null-terminated UTF-8, remainder filled with cryptographic random bytes)
+```
+
+6. `ciphertext = AES-128-ECB(k, plaintext)` — exactly 8 blocks of 16 bytes
+
+The client then emits:
+
+```text
+byte[128]   ciphertext
+byte[]      client_public_A   (length = keylen)
+```
+
+##### 6.2.6.4 Cryptographic Profile
+
+- Diffie-Hellman 1024-bit MODP, generator `2` (some servers use `5`)
+- key derivation: `key = MD5(shared)` — 16 bytes used as AES-128 key
+- record cipher: AES-128-ECB over a fixed 128-byte plaintext
+
+The plaintext padding (random bytes after the null terminators) ensures different sessions produce different ciphertexts even when the same credentials are reused.
+
+##### 6.2.6.5 Authentication Result
+
+The session continues with `ClientInit` and `ServerInit` upon `SecurityResult = 0`. Type 30 does not produce a post-auth session key consumed by the later record layer; the Apple AES-CBC record layer activates only after `EncodeEncryptionInfo` (§8).
+
+#### 6.2.7 Setup Tasks
 
 The next concrete tasks for type `35` and type `36` are:
 
@@ -736,7 +912,7 @@ The next concrete tasks for type `35` and type `36` are:
 4. type `36`: separate the initial SRP secure-layer setup from the later encrypted record layer and document the boundary precisely.
 5. type `34`: keep unresolved in this revision; do not infer its semantics from the now-better-understood type-35 and type-36 paths.
 
-#### 6.2.7 Branch Summary
+#### 6.2.8 Branch Summary
 
 ```text
 Server -> Client  : ProtocolVersion
@@ -1359,6 +1535,83 @@ byte[]  reserved_or_future_fields
 
 The active baseline uses a version `1` form.
 
+### 10.9 Apple Codec Encodings
+
+In addition to the metadata encodings defined in §10.3–§10.8, the server MAY emit framebuffer-update rectangles using Apple-specific codec encodings selected by the client's negotiated quality tier.
+
+#### 10.9.1 Encoding Identifiers
+
+| Encoding | Name | Class |
+|---|---|---|
+| `0x06` | Standard zlib | classical RFB; 32-bit pass-through |
+| `0x3e8` | Low Quality | Apple codec, 4-bit color reduction |
+| `0x3e9` | Medium Quality | Apple codec, 8-bit dithering |
+| `0x3ea` | High Quality | Apple codec, 16-bit RGB 5-6-5 |
+| `0x3f3` | Multi-Variant Scaled | per-tile adaptive codec |
+
+#### 10.9.2 Quality Tier Selection
+
+A conforming client SHOULD select one of five tier sets when advertising encodings:
+
+| Tier | Encodings Advertised |
+|---|---|
+| Full | `zlib, copyrect` |
+| Low | `0x3e8, zlib, zrle` |
+| Medium | `0x3e9, zlib, zrle` |
+| High | `0x3f3, 0x3ea, zlib, zrle` |
+| High + media-init | `0x3f2, 0x3f3, 0x3ea, zlib, zrle` |
+
+A client MAY restrict its advertised set to encodings it can decode. The High tier with `0x3f3` and `0x3ea` is the maintained default for current sessions.
+
+#### 10.9.3 Encoder Pipeline
+
+Encodings `0x3e8`, `0x3e9`, `0x3ea`, and `0x06` share a common zlib-based pipeline, differentiated by pixel pre-processing and deflate level:
+
+| Encoding | Pre-processing | Deflate level |
+|---|---|---|
+| `0x3e8` | 4-bit color (16-color palette per 8-pixel block) | `9` |
+| `0x3e9` | 8-bit YCoCg dithering, 2 pixels per byte | `6` |
+| `0x3ea` | 16-bit RGB 5-6-5 color | `1` |
+| `0x06` | 32-bit color, pass-through | `1` |
+
+Compression level varies inversely with quality.
+
+#### 10.9.4 Multi-Variant Scaled (`0x3f3`)
+
+`0x3f3` is a per-tile adaptive codec distinct from the shared zlib pipeline. Its rectangle body has the form:
+
+```text
+u8      tile_width
+u8      tile_height
+byte[]  command_bitstream     (per-tile type codes, run-length encoded)
+byte[]  render_data           (DCT coefficients, palette colors, masks)
+byte[]  trailer               (length fields; nominal 20 bytes)
+```
+
+The command bitstream identifies each tile by one of the following types:
+
+| Command | Name | Render data |
+|---|---|---|
+| `0` | White / Skip | none |
+| `1` | MatchPrevious | none (reuse same-position tile from previous frame) |
+| `2` | MatchAbove | none (reuse tile from row above) |
+| `3` | TwoColor (B&W) | 8-byte pixel mask plus two colors (YCoCg, 8/6/6 bits) |
+| `4` | TwoColor | 8-byte pixel mask plus two colors (YCoCg, 8/6/6 bits) |
+| `5..n` | DCT | quantized DCT coefficients in YCoCg color space |
+| `0x6d` | End marker | none |
+
+Colors are encoded in YCoCg color space with 8/6/6-bit quantization. The DCT quantization table is fixed for the baseline.
+
+Tiles are nominally `8 × 8` pixels. Tile geometry within a rectangle is `tile_width × tile_height` tiles laid out row-major.
+
+The exact bit-packing of the command bitstream and the exact DCT coefficient encoding are not fully specified in this revision and are tracked as revision gaps (§19).
+
+#### 10.9.5 Client Behavior
+
+A client MUST tolerate codec-encoded rectangles whose decoding it does not implement: such a client SHOULD NOT advertise the corresponding encoding in `SetEncodings`. A client MAY fall back to advertising only `0x06` (standard zlib) when it cannot decode any Apple codec encoding.
+
+A client that advertises `0x3f3` or `0x3ea` MUST be prepared to decode rectangles using those encodings; the server is not required to fall back to `0x06` once a codec encoding is advertised.
+
 ## 11. Startup Message Ordering
 
 ### 11.1 Maintained Ordering
@@ -1385,6 +1638,53 @@ The maintained startup ordering is:
 ### 11.2 Compatibility Requirement
 
 Clients SHOULD preserve this ordering unless a later revision of the specification defines a compatible alternative.
+
+### 11.3 End-to-End Startup Diagram
+
+Figure 11-1 illustrates the message order from authentication completion through the first post-rekey control burst:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Authentication complete (any branch)
+
+    C->>S: ClientInit
+    S->>C: ServerInit
+
+    Note over C,S: Cleartext prelude (§7.4)
+    C->>S: ViewerInfo
+    C->>S: SetEncryptionMessage(command=1)
+    C->>S: SetModeMessage(mode=1)
+    C->>S: SetEncryptionMessage(command=2 short)
+
+    Note over S: EncodeEncryptionInfo sender path
+    S->>C: 0x44f rekey (§8)
+
+    Note over C,S: AES-CBC record layer active
+
+    Note over C,S: Encrypted preface (§8.5)
+    C->>S: 0x1d SetDisplayConfiguration
+    C->>S: 0x02 SetEncodings
+
+    Note over C,S: First post-rekey server burst (§10.3-§10.7)
+    S->>C: 0x451 AppleDisplayLayout
+    S->>C: 0x453 VendorKeysymEncoding
+    S->>C: 0x455 KeyboardInputSource
+    S->>C: 0x456 DeviceInfo
+    S->>C: 0x450 CursorImage
+
+    Note over C,S: First post-rekey client burst
+    C->>S: 0x0d SetDisplayMessage
+    C->>S: 0x00 SetPixelFormat
+    C->>S: 0x02 SetEncodings
+    C->>S: 0x15 AutoPasteboard
+    C->>S: 0x08 scale-factor control
+    C->>S: 0x09 AutoFrameBufferUpdate
+
+    Note over C,S: Steady-state framebuffer + polling
+```
 
 ## 12. Message Summary Tables
 
@@ -1428,7 +1728,7 @@ A minimally conforming client for this revision:
 - resizes correctly on layout changes
 - sustains a framebuffer-backed virtual-display session
 
-This conformance level corresponds to the maintained demo-client capability currently represented by `libvncserver/examples/client/applehpdebug.c`.
+This conformance level corresponds to the minimum capability required for a client to authenticate, establish the encrypted transport, and sustain a framebuffer-backed session.
 
 ### 13.2 Extended Client Conformance
 
@@ -1451,7 +1751,7 @@ A conforming server for this revision:
 
 ## 14. High-Performance Extension
 
-### 12.1 Definition
+### 14.1 Definition
 
 High-performance mode is the Apple extension state associated with:
 
@@ -1462,7 +1762,7 @@ High-performance mode is the Apple extension state associated with:
 
 High-performance mode is a session-state property. It is not an authentication property and is not bound to any single security type.
 
-### 12.2 Current Interoperable Model
+### 14.2 Current Interoperable Model
 
 This revision defines the current interoperable high-performance model as follows:
 
@@ -1472,13 +1772,13 @@ This revision defines the current interoperable high-performance model as follow
 - the same high-performance session behavior may follow more than one authentication branch
 - observed high-performance operation is not limited to auth types `33`, `35`, or `36`; type `30` can also lead to the same later session class
 
-### 12.3 Media Initialization
+### 14.3 Media Initialization
 
 Advertising `0x3f2` in `SetEncodings` is a real high-performance/media-init trigger. A client MAY use it to request media-path negotiation state.
 
 The returned `RFBMediaStreamMessage1` SHOULD be interpreted as media-init configuration rather than immediate proof of sustained media transport.
 
-### 12.4 Session Classes Within High-Performance Mode
+### 14.4 Session Classes Within High-Performance Mode
 
 This revision recognizes at least two high-performance outcomes:
 
@@ -1486,6 +1786,22 @@ This revision recognizes at least two high-performance outcomes:
 - media-init-capable high-performance mode with additional stream configuration state
 
 The exact transition from the former to sustained compressed-media delivery remains a revision gap.
+
+Figure 14-1 illustrates the content-path choice after authentication and the encrypted preface:
+
+```mermaid
+flowchart TB
+    Auth[Authentication complete] --> Setup["Encrypted preface:<br/>SetDisplayConfiguration<br/>SetEncodings"]
+    Setup --> Decision{High-performance<br/>gates pass?}
+    Decision -->|gates pass +<br/>media path negotiated| MediaBranch["Compressed-media branch<br/>(dedicated media transport)"]
+    Decision -->|virtual display only<br/>or fallback| FBBranch["TCP framebuffer branch"]
+    FBBranch --> FBContent["Stream content:<br/>zlib framebuffer rectangles<br/>+ Apple-private metadata<br/>(0x450, 0x451, 0x453, 0x455, 0x456)<br/>+ optional 0x3f3 MVS tiles"]
+    MediaBranch --> MediaContent["Stream content:<br/>compressed-media samples<br/>on a dedicated media transport"]
+    FBContent --> CPUDecode[Framebuffer composition]
+    MediaContent --> HWDecode[Media decode + presentation]
+```
+
+The transition from the framebuffer branch to the compressed-media branch within a single session is not fully specified in this revision (§19).
 
 ## 15. Client Behavior
 
@@ -1513,11 +1829,11 @@ A conforming server:
 
 ## 17. Error Handling and Fallback Behavior
 
-### 15.1 General Principle
+### 17.1 General Principle
 
 Clients and servers SHOULD preserve compatibility by treating unknown or partially specified fields conservatively and by preserving the message ordering defined by this revision.
 
-### 15.2 Fallback
+### 17.2 Fallback
 
 This revision recognizes that a session MAY remain on a framebuffer-backed path even when:
 
@@ -1525,7 +1841,7 @@ This revision recognizes that a session MAY remain on a framebuffer-backed path 
 - media-init signaling is present
 - high-performance mode is otherwise negotiated
 
-### 15.3 Undefined Fields
+### 17.3 Undefined Fields
 
 Where this document marks a field or transition as unspecified, implementations SHOULD preserve interoperable values rather than inventing new semantics.
 
@@ -1541,12 +1857,19 @@ Where this document marks a field or transition as unspecified, implementations 
 
 The following items are intentionally left as revision gaps in this document:
 
-- full field-level schema for some `AppleDisplayLayout` payloads
-- complete semantic definition of the rekey generation/counter field
+- full field-level schema for some `AppleDisplayLayout` (§10.4) payloads
+- complete semantic definition of the rekey generation/counter field (§8.2)
 - exact semantics of later `0x10` client records
-- exact conditions that transition a session from virtual-display framebuffer behavior to sustained media behavior
-- exact follow-up behavior after `RFBMediaStreamMessage1`
-- complete semantics of all capability bits within `ViewerInfo`
+- exact conditions that transition a session from virtual-display framebuffer behavior to sustained media behavior (§14)
+- exact follow-up behavior after `RFBMediaStreamMessage1` (§10.8)
+- complete semantics of all capability bits within `ViewerInfo` (§7.5)
+- exact bit-packing of the `0x3f3` command bitstream and the exact DCT coefficient encoding (§10.9.4)
+- exact wire format of `0x3ea` rectangle bodies beyond the documented pre-processing (§10.9.3)
+- exact runtime condition that causes the viewer to instantiate the AVC media view rather than the standard framebuffer view (§14)
+- complete record-layer grammar for the type-36 (§6.2.5) secure-layer after the initial SRP exchange
+- exact normative symbolic mapping for `VendorKeysymEncoding` (§10.5) vendor keysym values
+- exact role of the type-30 (§6.2.6) "machine serial number" log variant
+- complete value enumeration for the URL-parameter set in Appendix C (`encrypt`, `auth`, `control`, `hdr`, `panning`, `windowAlignment`, and similar enumerated parameters)
 
 ## Appendix A. Startup Sequence Summary
 
@@ -1576,6 +1899,59 @@ The maintained startup summary is:
 | `0x455` | `KeyboardInputSource` | keyboard metadata |
 | `0x456` | `DeviceInfo` | device metadata |
 | `0x3f2` | `RFBMediaStreamMessage1` | media-init metadata |
+
+## Appendix C. Client URL Conventions (Informative)
+
+This appendix is informative. It documents the URL-parameter set the native client implementation interprets when invoked through a `vnc://` URL. These parameters are not part of the on-wire protocol; they are client-side configuration. However, several of them deterministically affect on-wire behavior — for example, the `quality` parameter selects which encodings the client advertises in `SetEncodings` (§10.1) and therefore which tier rule from §10.9.2 governs the session. Other parameters affect only client UI or local policy and produce no observable on-wire change.
+
+The URL form is:
+
+```text
+vnc://<host>[:<port>][?<key>=<value>[&<key>=<value>...]]
+```
+
+Parameter names are case-sensitive. Multiple key-value pairs are joined with `&`. Unknown parameters SHOULD be ignored.
+
+### C.1 Parameter Registry
+
+Table C-1 lists the parameters interpreted by the native client. The "Wire effect" column indicates whether the parameter changes anything observable in protocol traffic.
+
+| Parameter | Type | Wire effect | Notes |
+|---|---|---|---|
+| `quality` | enum | Yes — selects the encoding tier from §10.9.2 | Values: `low`, `medium`, `full`, `high`. See C.2. |
+| `encrypt` | enum | Yes — affects whether the client advertises encryption-related session behavior | Value range not exhaustively enumerated in this revision. |
+| `auth` | enum | Yes — narrows the security-type acceptance set during §6.1.5 selection | Value range not exhaustively enumerated in this revision. |
+| `control` | bool / enum | Yes — selects `SetModeMessage(mode=0)` for observe vs `mode=1` for control (§7.7) | Value range not exhaustively enumerated in this revision. |
+| `fallBackToObserve` | bool | Yes — if true, on authorization denial the client retries with the observe path (§4.3) instead of failing | Boolean. |
+| `numVirtualDisplays` | integer | Yes — sets the `display_count` field in `SetDisplayConfiguration` (§9.1); also enters the `virtualDisplayCount` gate in high-performance promotion (§14) | Non-negative integer. |
+| `hdr` | bool / enum | Yes — declares HDR intent, affecting later capability advertisement | Value range not exhaustively enumerated in this revision. |
+| `displayID` | integer / identifier | Yes — selects which server display to show, mapping to the display-id field in `SetDisplayMessage` (§9.4) | When set, the client emits `SetDisplayMessage` with `combineAllDisplays = 0` and the given identifier; when absent, the default aggregate behavior of `SetDisplayMessage` applies. |
+| `deviceID` | identifier | No (informative) | Used for client-side bookkeeping. |
+| `displayName` | string | No (informative) | Used for client-side display labels. |
+| `panning` | bool / enum | No | Client viewport behavior. |
+| `showConnectionProgress` | bool | No | Client UI. |
+| `windowAlignment` | enum | No | Client window placement. |
+| `disableReconnect` | bool | No | Client retry policy. |
+
+### C.2 Quality Mapping
+
+The `quality` parameter selects one of the encoding-tier sets defined in §10.9.2:
+
+| `quality=` value | Tier (per §10.9.2) | Encodings advertised in `SetEncodings` |
+|---|---|---|
+| `low` | Low | `0x3e8, zlib, zrle` |
+| `medium` | Medium | `0x3e9, zlib, zrle` |
+| `full` | Full | `zlib, copyrect` |
+| `high` | High | `0x3f3, 0x3ea, zlib, zrle` |
+| (omitted) | High (default) | `0x3f3, 0x3ea, zlib, zrle` |
+
+When the high-performance gates of §14 are also satisfied (notably client advertisement of `0x3f2` as defined in §14.3), the advertised set becomes `0x3f2, 0x3f3, 0x3ea, zlib, zrle`.
+
+### C.3 Conformance Note
+
+A client that does not implement URL parsing remains fully conformant; the parameters in this appendix are not on-wire protocol. A client that does implement URL parsing SHOULD translate the parameters with observable wire effect into the corresponding on-wire choices consistently. For parameters whose value range is not exhaustively enumerated in this revision, the client SHOULD accept the values it recognises and ignore the rest rather than rejecting the URL outright.
+
+The complete value enumeration for `encrypt`, `auth`, `control`, `hdr`, `panning`, `windowAlignment`, and similar enumerated parameters is not fully specified in this revision; this is a known revision gap (§19).
 
 ## 20. IANA Considerations
 
